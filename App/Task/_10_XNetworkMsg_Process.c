@@ -61,6 +61,18 @@ BOOL Network_TCP_DebugSend(const uint8_t *msg, size_t len)
 ** @brief This function is a function of parsing and processing data received
 **        through TCP communication.
 *******************************************************************************/
+
+typedef struct {
+    char data[BUFFER_SIZE_RX_MSG];
+    unsigned int used;
+    bool discarding;
+    char previous;
+} tsCommandFrame;
+static tsCommandFrame sFrames[8];
+void Network_ResetReceive(int socketId) {
+    if (socketId >= 0 && socketId < 8) memset(&sFrames[socketId], 0, sizeof(sFrames[0]));
+}
+
 #if 0
 void Network_MsgProcess(int MsgId, int MsgLength, char *pData)
 {
@@ -92,65 +104,33 @@ void Network_MsgProcess(int MsgId, int MsgLength, char *pData)
     }
 }
 #else
-void Network_MsgProcess(int MsgId, int MsgLength, char *pData)
-{
-    (void)MsgId;
-    static char oneFrame[1460];
-    int start = 0;
-    int handled = 0;
-
-    if (gTriggerCount < __5sec) /* [주의]: 수정 금지 */
-    {
-        /* [] 상태머신 시작전에는 무시. */
-        // 부팅후 5초간 상위로직에서 보내는 명령 무시
-        // 개발간에 FW 다운로드시에 PC 에서 명령을 빠르게 계속 보내면 문제가 발생할수 있다.
-        return; // 제어 로직 안정화 시간
-    }
-
-    if (pData == NULL || MsgLength <= 0)
-    {
+void Network_MsgProcess(int MsgId, int MsgLength, char *pData) {
+    if (MsgId < 0 || MsgId >= 8 || !pData || MsgLength <= 0) return;
+    if (gTriggerCount < __5sec) {
+        Network_ResetReceive(MsgId);
         return;
     }
-
-    for (int i = 0; i < MsgLength - 1; i++)
-    {
-        if (pData[i] == '\r' && pData[i + 1] == '\n')
-        {
-            int len = i - start + 2; // \r\n 포함 길이
-
-            memcpy(oneFrame, &pData[start], len);
-            oneFrame[len] = '\0';
-            teXParsingErrorCode result = xParser_ProcessReceivedData(oneFrame, &xParsedData_Network, COMM_TCP);
-            if (result == PARSER_ERR_SUCCESS)
-            {
-                Handle_command(&xParsedData_Network, COMM_TCP);
-                if (gCurrentError.severity == _INFO || gCurrentError.severity == _WARNING)
-                {
-                    SetErrorCode(ERROR_CODE_NONE, __func__, __LINE__);
-                }
-                else
-                {
-                    ; // _CRITICAL 처리
-                }
-            }
-            else
-            {
-                xParser_HandleError(__func__, result, __LINE__);
-            }
-
-            handled = 1;
-            start = i + 2;
-            i++; // LF 건너뛰기
+    tsCommandFrame *frame = &sFrames[MsgId];
+    for (int i = 0; i < MsgLength; ++i) {
+        char ch = pData[i];
+        bool end = frame->previous == '\r' && ch == '\n';
+        if (!frame->discarding) {
+            if (frame->used >= sizeof(frame->data) - 1) {
+                frame->used = 0;
+                frame->discarding = true;
+                SetErrorCode(ERROR_CODE_INVALID_COMMAND, __func__, __LINE__);
+            } else frame->data[frame->used++] = ch;
         }
-    }
-
-    /*
-     * CRLF가 하나도 없거나,
-     * 마지막 명령 뒤에 CRLF 없는 데이터가 남은 경우
-     */
-    if (handled == 0 || start < MsgLength)
-    {
-        SetErrorCode(ERROR_CODE_INVALID_COMMAND, __func__, __LINE__);
+        frame->previous = ch;
+        if (!end) continue;
+        if (!frame->discarding && frame->used > 2) {
+            frame->data[frame->used] = '\0';
+            tsXParsedData parsed;
+            teXParsingErrorCode result = xParser_ProcessReceivedData(frame->data, &parsed, COMM_TCP);
+            if (result == PARSER_ERR_SUCCESS) Handle_command(&parsed, COMM_TCP);
+            else SetErrorCode(ERROR_CODE_INVALID_COMMAND, __func__, __LINE__);
+        }
+        Network_ResetReceive(MsgId);
     }
 }
 #endif

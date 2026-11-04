@@ -393,31 +393,25 @@ static bool CMD_BeginMaintenance(void){
  * @brief 대기 상태에서 PL을 EEPROM에 저장한다.
  * RPOS 저장 후보가 있으면 먼저 ZCap_UpPos에 반영한다. 유지보수 잠금 획득 후에만 주기 타이머를 정지한다.
  */
-void CMD_Handle_SAVEE(const tsXParsedData *parsedData, U08 useTCP)
-{
-    if (parsedData->ParamCount == 0)
-    {
-        if (!CMD_BeginMaintenance()) return;
-        XTimer_Stop();
-        if (gZCapUpPosSavePending)
-        {
-            xPL.Decapper.ZCap_UpPos = gZCapUpPosPendingValue;
-            gZCapUpPosSavePending = false;
+void CMD_Handle_SAVEE(const tsXParsedData *p, U08 comm) {
+    bool explicitSave = p->ParamCount==1 && p->Params[0].type==PARAM_TYPE_INT && p->Params[0].value._int==1;
+    if(p->ParamCount!=0 && !explicitSave){XBuffer_AddString(xSendMsg,"INVALID",NO_COMMA);return;}
+    if(!CMD_BeginMaintenance())return;
+    S32 previous=xPL.Decapper.ZCap_UpPos;
+    if(!explicitSave && gZCapUpPosSavePending) {
+        if(!CDecap_IsValidTarget(aZ,gZCapUpPosPendingValue)) {
+            CDecap_EndMaintenance();XBuffer_AddString(xSendMsg,"RANGE",NO_COMMA);return;
         }
-        // [YYMMDD] parameter를 EEPROM에 저장한 날짜 저장
-        xPL.Header.UpdateDate = SWRTC_GetTime_YYMMDDHH();
-
-        EEPROMPL_SaveToEEPROM();
-        XTimer_Start();
-        CDecap_EndMaintenance();
+        xPL.Decapper.ZCap_UpPos=gZCapUpPosPendingValue;
     }
-    else
-    {
-        SetErrorCode(ERROR_CODE_INVALID_ARGUMENT, __func__, __LINE__);
-        XBuffer_AddString(xSendMsg, GetErrorCode_char(), NO_COMMA);
-        if (parsedData->Params[0].value._int != '?')
-            xParser_HandleError(__func__, PARSER_ERR_INVALID_CMD, 0);
-    }
+    XTimer_Stop();
+    xPL.Header.UpdateDate=SWRTC_GetTime_YYMMDDHH();
+    bool saved=EEPROMPL_SaveVerified();
+    XTimer_Start();
+    if(saved)gZCapUpPosSavePending=false;
+    else if(!explicitSave)xPL.Decapper.ZCap_UpPos=previous;
+    CDecap_EndMaintenance();
+    XBuffer_AddString(xSendMsg,saved?"OK":"FAIL",NO_COMMA);
 }
 
 /**
@@ -470,27 +464,22 @@ void CMD_Handle_SAVEA(const tsXParsedData *parsedData, U08 useTCP)
 }
 
 /**
- * @brief 대기 상태에서 EEPROM을 gEEPROM으로 읽고 저장 구조를 출력한다.
- * 읽기 동안 유지보수 잠금을 유지한다. Decapper 드라이버 재초기화를 직접 호출하지 않는다.
+ * @brief 대기 상태에서 검증된 EEPROM을 RAM과 드라이버에 반영한다.
+ * 타이머 복구까지 유지보수 잠금을 유지하고 HOME 기준 및 기존 RPOS 후보를 무효화한다.
  */
-void CMD_Handle_LOADE(const tsXParsedData *parsedData, U08 useTCP)
-{
-    if (parsedData->ParamCount == 0)
-    {
-        if (!CMD_BeginMaintenance()) return;
-        XTimer_Stop();
-        EEPROMPL_LoadFromEEPROM(&gEEPROM);
-        EEPROMPL_PrintEepromStructure_user();
-        XTimer_Start();
-        CDecap_EndMaintenance();
+void CMD_Handle_LOADE(const tsXParsedData *p, U08 comm) {
+    if(p->ParamCount!=0){XBuffer_AddString(xSendMsg,"INVALID",NO_COMMA);return;}
+    if(!CMD_BeginMaintenance())return;
+    XTimer_Stop();
+    bool loaded=EEPROMPL_LoadFromEEPROM(&gEEPROM);
+    if(loaded) {
+        SYSPL_UpdateSystemParams();
+        CDecap_Init(); /* idle-only reconfiguration invalidates the home reference */
+        gZCapUpPosSavePending=false;
     }
-    else
-    {
-        SetErrorCode(ERROR_CODE_INVALID_ARGUMENT, __func__, __LINE__);
-        XBuffer_AddString(xSendMsg, GetErrorCode_char(), NO_COMMA);
-        if (parsedData->Params[0].value._int != '?')
-            xParser_HandleError(__func__, PARSER_ERR_INVALID_CMD, 0);
-    }
+    XTimer_Start();
+    CDecap_EndMaintenance();
+    XBuffer_AddString(xSendMsg,loaded?"OK HOME_REQUIRED":"FAIL",NO_COMMA);
 }
 
 /**
@@ -839,79 +828,30 @@ void CMD_Handle_RTC(const tsXParsedData *parsedData, U08 useTCP)
  * 현재 EEPROM 저장과 Network_Init 호출은 주석 상태이므로 여기서 영구 저장/즉시 네트워크 재설정을 하지 않는다.
  * 현재 구현은 검사 전에 타이머를 멈추며 잘못된 옥텟이나 전체 0/255 주소의 조기 반환에서는 타이머를 복구하지 않는다.
  */
-void CMD_Handle_SetGetIP(const tsXParsedData *parsedData, U08 useTCP)
-{
-    // help
-    if (IS_USB(useTCP) && IS_CMD_HELP(parsedData))
-    {
-        int i = 1;
-        xprintf("\tCommand: [IP] [xx,xx,xx,xx]");
-        xprintf("\t===============================");
-        xprintf("\t %d) IP             : Get the current IP address.", i++);
-        xprintf("\t %d) IP xx,xx,xx,xx : Set a new IP address. " ANSI_TX_LightGreen "Use commas (,) as separators." ANSI_TX_ORG, i++);
+void CMD_Handle_SetGetIP(const tsXParsedData *p, U08 comm) {
+    if(p->ParamCount==0) {
+        for(int n=0;n<4;n++)XBuffer_AddInt(xSendMsg,xSystemInfo.network.ip[n],COMMA);
+        XBuffer_AddInt(xSendMsg,xSystemInfo.network.portNum,NO_COMMA);
         return;
     }
-
-    // Get current IP address if no parameters, or set new IP if 4 parameters are provided
-    if (parsedData->ParamCount == 0)
-    {
-        XBuffer_AddInt(xSendMsg, xSystemInfo.network.ip[0], COMMA);
-        XBuffer_AddInt(xSendMsg, xSystemInfo.network.ip[1], COMMA);
-        XBuffer_AddInt(xSendMsg, xSystemInfo.network.ip[2], COMMA);
-        XBuffer_AddInt(xSendMsg, xSystemInfo.network.ip[3], COMMA);
-        XBuffer_AddInt(xSendMsg, xSystemInfo.network.portNum, NO_COMMA);
-
-        xprintf("current IP : %d.%d.%d.%d, %d",
-                (int)xSystemInfo.network.ip[0],
-                (int)xSystemInfo.network.ip[1],
-                (int)xSystemInfo.network.ip[2],
-                (int)xSystemInfo.network.ip[3],
-                (int)xSystemInfo.network.portNum);
-    }
-    else if (parsedData->ParamCount == 4)
-    {
-        U8 ip[4];
-
-        XTimer_Stop();
-        for (int i = 0; i < 4; i++)
-        {
-            int value = parsedData->Params[i].value._int;
-
-            if (value < 0 || value > 255)
-            {
-                SetErrorCode(ERROR_CODE_INVALID_ARGUMENT, __func__, __LINE__);
-                ERR_MSG_SEND("%s(%d): Invalid IP octet %d (must be 0–255)", __func__, __LINE__, value);
-                return;
-            }
-
-            ip[i] = (U8)value;
+    if(IS_USB(comm) && IS_CMD_HELP(p)){xprintf("IP a,b,c,d");return;}
+    U08 ip[4];
+    if(p->ParamCount!=4){XBuffer_AddString(xSendMsg,"INVALID",NO_COMMA);return;}
+    bool allZero=true, allFF=true;
+    for(int n=0;n<4;n++) {
+        if(p->Params[n].type!=PARAM_TYPE_INT || p->Params[n].value._int<0 || p->Params[n].value._int>255) {
+            XBuffer_AddString(xSendMsg,"INVALID",NO_COMMA);return;
         }
-
-        if ((ip[0] == 0 && ip[1] == 0 && ip[2] == 0 && ip[3] == 0) ||
-            (ip[0] == 255 && ip[1] == 255 && ip[2] == 255 && ip[3] == 255))
-        {
-            SetErrorCode(ERROR_CODE_INVALID_ARGUMENT, __func__, __LINE__);
-            ERR_MSG_SEND("%s(%d): Invalid IP address (all 0s or all 255s)", __func__, __LINE__);
-            return;
-        }
-
-        SystemInfo_Network_SetIP(&xSystemInfo.network, ip);
-        //// Network_Init(); // 수정된거 반영
-        // EEPROMPL_SaveToEEPROM();
-
-        __newLine();
-        LOG_MSG_SEND("IP address set to " ANSI_TX_LightGreen "%d.%d.%d.%d" ANSI_TX_ORG, ip[0], ip[1], ip[2], ip[3]);
-        LOG_MSG_SEND(ANSI_TX_LightRed "Please [REBOOT] after changing the IP address." ANSI_TX_ORG);
-
-        XTimer_Start();
+        ip[n]=(U08)p->Params[n].value._int;
+        allZero=allZero && ip[n]==0;allFF=allFF && ip[n]==255;
     }
-    else
-    {
-        SetErrorCode(ERROR_CODE_INVALID_ARGUMENT, __func__, __LINE__);
-        XBuffer_AddString(xSendMsg, GetErrorCode_char(), NO_COMMA);
-        if (parsedData->Params[0].value._int != '?')
-            xParser_HandleError(__func__, PARSER_ERR_INVALID_CMD, 0);
-    }
+    if(allZero || allFF){XBuffer_AddString(xSendMsg,"INVALID",NO_COMMA);return;}
+    if(!CMD_BeginMaintenance())return;
+    XTimer_Stop();
+    SystemInfo_Network_SetIP(&xSystemInfo.network,ip);
+    XTimer_Start();
+    CDecap_EndMaintenance();
+    XBuffer_AddString(xSendMsg,"OK SAVE_AND_REBOOT_REQUIRED",NO_COMMA);
 }
 
 /**

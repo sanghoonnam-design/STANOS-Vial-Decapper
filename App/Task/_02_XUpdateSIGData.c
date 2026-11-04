@@ -49,7 +49,6 @@ VOID TASK_UpdateSIGData(void *pvParameters)
             //===============================================================
             xCDecap.Senser_Update();
             xCDecap.Status_Update();//
-            xCDecap.CT_Cap_Body_Update();
             //===============================================================
             gTick_USD = ITIMER_StopMeasure_us(startTick);
             __TASK_TRIGGER_END_Using(TEST_PORT_1, TP_IDX_taskUSD);

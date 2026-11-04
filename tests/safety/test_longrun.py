@@ -115,6 +115,9 @@ int main(void){
  setup();start();for(int n=0;n<150;n++)tick();tsXParsedData cmd={0};CMD_Handle_STOP(&cmd,0);CMD_Handle_RESUME(&cmd,0);tick();
  int beforeMoves=moveCount;for(int n=0;n<100;n++)tick();
  CHECK("STOP cannot be undone by RESUME",sPhase==DFSM_IDLE && moveCount==beforeMoves && !xSL.isBusy);
+ setup();cmd.ParamCount=1;cmd.Params[0].type=PARAM_TYPE_INT;cmd.Params[0].value._int=3;CMD_Handle_LongRun(&cmd,0);
+ for(int n=0;n<10000;n++){tick();if(sPhase==DFSM_IDLE)break;}
+ CHECK("finite LR ends exactly after full CAP cycle",xCD.Decapper.LongRunCount==3 && sPhase==DFSM_IDLE && !xSL.isBusy && position[1]==0);
  return failures?1:0;
 }
 '''

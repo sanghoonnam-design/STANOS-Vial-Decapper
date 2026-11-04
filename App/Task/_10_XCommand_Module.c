@@ -12,6 +12,7 @@
 #include "XSystemInfo.h"
 #include "_10_XCommand_Module.h"
 #include "XSystem_DB.h"
+#include "TMC429.h"
 #include "_04_XDiagnose.h"
 
 // #include "_04_XDiagnose_Def.h"
@@ -28,14 +29,23 @@ const tsXCommandMapping gModuleCommandTable[] =
         /** @note USER CODE BEGIN */
 
         /*User Command*/
-        {0, "GSTA", /*      */ CMD_Handle_GSTA, /*            */ "Get the system State.", /*            */ "GSTA"},     // 시스템 상태 반환
+        {0, "GPOS", /*      */ CMD_Handle_GPOS,/*             */ "Pure position query.",/*              */"GPOS Z|R"},
+        {0, "TEACH", /*     */ CMD_Handle_TEACH,/*            */ "Set explicit teaching position.",/*   */ "TEACH idx,pulse"},
+        {0, "PGET", /*      */ CMD_Handle_PGET,/*             */ "Read Decapper parameter.",/*          */"PGET idx"},
+        {0, "PCONFIG", /*   */ CMD_Handle_PCONFIG,/*          */ "Get API schema/index base.", /*       */"PCONFIG"},
+
+		{0, "GSTATE", /*    */ CMD_Handle_GSTATE,/*           */ "Structured machine state.", /*        */"GSTATE"},
+        {0, "GSENSOR", /*   */ CMD_Handle_GSENSOR,/*          */ "Raw sensor inputs.", /*               */ "GSENSOR"},
+        {0, "GLR", /*       */ CMD_Handle_GLR,/*              */ "Long-run progress.", /*               */ "GLR"},
+
+		{0, "GSTA", /*      */ CMD_Handle_GSTA, /*            */ "Get the system State.", /*            */ "GSTA"},     // 시스템 상태 반환
         {0, "ST", /*        */ CMD_Handle_GSTA, /*            */ "Get the system State.", /*            */ "ST"},       // 시스템 상태 반환
 
         /** @note 각 장비에 해당하는 명령어 */
 		{0, "SPD", /*       */ CMD_Handle_SPEED, /*           */ "Get/set motor speed percent.", /*		*/ "SPD [1~100]"},
 		{0, "SPEED", /*     */ CMD_Handle_SPEED, /*           */ "Get/set motor speed percent.", /*    	*/ "SPEED [1~100]"},
 
-		{0, "HOME", /*      */ CMD_Handle_HOME, /*            */ "Run homing sequence.", /*         	*/ "HOME"}, // Z 원점 탐색 및 Y High 복귀 요청
+		{0, "HOME", /*      */ CMD_Handle_HOME, /*            */ "Run homing sequence.", /*         	*/ "HOME"}, // Z 원점 탐색 및 Y Forward 복귀 요청
 
 		{0, "STOP", /*      */ CMD_Handle_STOP, /*            */ "Stop all Decapper motion.", /*    	*/ "STOP"}, // 전체 모션 정지 요청
 		{0, "PAUSE", /*     */ CMD_Handle_PAUSE, /*           */ "Pause current operation.", /*     	*/ "PAUSE"}, // 자동 동작 일시정지 요청
@@ -51,7 +61,7 @@ const tsXCommandMapping gModuleCommandTable[] =
 
 		{1, "ORG", /*       */ CMD_Handle_ORIGIN, /*          */ "Move to origin position.", /*     	*/ "ORG"}, // 기존 원점 좌표로 복귀 요청
 		{1, "MOVE", /*      */ CMD_Handle_MOVE, /*            */ "Move Z/R axis.", /*               	*/ "MOVE <R|A> <Z|R> <pulse>"}, // Z/R 축 상대/절대 위치 이동
-		{1, "READY", /*     */ CMD_Handle_READY, /*            */ "Move Y axis to limit.", /*          	*/ "READY <0|1>"}, // 0: Y High, 1: Y Low
+		{1, "READY", /*     */ CMD_Handle_READY, /*            */ "Move Y axis to limit.", /*          	*/ "READY <0|1>"}, // 0: Y Forward, 1: Y Back
 
 		{1, "UDECAP", /*    */ CMD_Handle_UDECAP, /*          */ "Run unit decapping.", /*          	*/ "UDECAP"}, // Z/R 중심의 유닛 분리 시험
 		{1, "UCAP", /*      */ CMD_Handle_UCAP, /*            */ "Run unit capping.", /*            	*/ "UCAP"}, // Z/R 중심의 유닛 체결 시험
@@ -153,7 +163,7 @@ __attribute__((unused)) static int GetParamFloat(const tsXParsedData *parsedData
 
 /*User Command*/
 /**
- * @brief GSTA/ST 응답에 Busy, Enable, Homed, Error와 오류 코드를 순서대로 기록한다.
+ * @brief GSTA/ST에 기존 상태 5개와 Cap/Vial 보유 상태를 순서대로 기록한다.
  * Decapper 오류를 공통 오류 값에 동기화한 뒤 보고한다. 동작 완료 여부는 이 상태로 확인한다.
  */
 void CMD_Handle_GSTA(const tsXParsedData *parsedData, U08 useTCP){
@@ -166,6 +176,8 @@ void CMD_Handle_GSTA(const tsXParsedData *parsedData, U08 useTCP){
         /* [03] */ XBuffer_AddInt(xSendMsg, xSL.isHomed, COMMA);
         /* [04] */ XBuffer_AddInt(xSendMsg, xSL.isError, COMMA);
         /* [05] */ XBuffer_AddString(xSendMsg, GetErrorCode_char(), COMMA);
+        /* [06] */ XBuffer_AddInt(xSendMsg, xSL.Decapper.isGripCap, COMMA);
+        /* [07] */ XBuffer_AddInt(xSendMsg, xSL.Decapper.isGripBody, NO_COMMA);
         //  ==============================================================================
     }
     else {
@@ -356,6 +368,12 @@ void CMD_Handle_Print_SL(const tsXParsedData *parsedData, U08 useTCP) {
     }
 
     if (parsedData->ParamCount == 0) {
+        XBuffer_AddString(xSendMsg,"STATE=",NO_COMMA);
+        CMD_Handle_GSTATE(parsedData,useTCP);
+        XBuffer_AddString(xSendMsg,";SENSOR=",NO_COMMA);
+        CMD_Handle_GSENSOR(parsedData,useTCP);
+        if(useTCP!=COMM_USB)return;
+
         xcprintf(ANSI_TX_LightYellow);
         xprintf("\t======================================================================");
         xprintf("\t                         [ State List : xSL ]                         ");
@@ -377,10 +395,10 @@ void CMD_Handle_Print_SL(const tsXParsedData *parsedData, U08 useTCP) {
         xprintf("\t----------------------------------------------------------------------");
 
         xprintf("\t[ xSL.Decapper ]");
-        xprintf("\t  %-42s : %10d", "xSL.Decapper.Cap_is", xSL.Decapper.Cap_is);
-        xprintf("\t  %-42s : %10d", "xSL.Decapper.Body_is", xSL.Decapper.Body_is);
+        xprintf("\t  %-42s : %10d", "xSL.Decapper.isGripCap", xSL.Decapper.isGripCap);
+        xprintf("\t  %-42s : %10d", "xSL.Decapper.isGripBody", xSL.Decapper.isGripBody);
         xprintf("\t  %-42s : %10d", "xSL.Decapper.Z_HL_isError", xSL.Decapper.Z_HL_isError);
-        xprintf("\t  %-42s : %10d", "xSL.Decapper.Y_HL_isError", xSL.Decapper.Y_HL_isError);
+        xprintf("\t  %-42s : %10d", "xSL.Decapper.Y_FB_isError", xSL.Decapper.Y_FB_isError);
         xprintf("\t  %-42s : %10d", "xSL.Decapper.CT_Cap_Grip_isError", xSL.Decapper.CT_Cap_Grip_isError);
         xprintf("\t  %-42s : %10d", "xSL.Decapper.CT_Body_Grip_isError", xSL.Decapper.CT_Body_Grip_isError);
 
@@ -388,8 +406,8 @@ void CMD_Handle_Print_SL(const tsXParsedData *parsedData, U08 useTCP) {
         xprintf("\t[ xSL.CDecapping_Sensor ]");
         xprintf("\t  %-42s : %10d", "xSL.CDecapping_Sensor.Z_H_Limit_Sensor", xSL.CDecapping_Sensor.Z_H_Limit_Sensor);
         xprintf("\t  %-42s : %10d", "xSL.CDecapping_Sensor.Z_L_Limit_Sensor", xSL.CDecapping_Sensor.Z_L_Limit_Sensor);
-        xprintf("\t  %-42s : %10d", "xSL.CDecapping_Sensor.Y_H_Limit_Sensor", xSL.CDecapping_Sensor.Y_H_Limit_Sensor);
-        xprintf("\t  %-42s : %10d", "xSL.CDecapping_Sensor.Y_L_Limit_Sensor", xSL.CDecapping_Sensor.Y_L_Limit_Sensor);
+        xprintf("\t  %-42s : %10d", "xSL.CDecapping_Sensor.Y_F_Limit_Sensor", xSL.CDecapping_Sensor.Y_F_Limit_Sensor);
+        xprintf("\t  %-42s : %10d", "xSL.CDecapping_Sensor.Y_B_Limit_Sensor", xSL.CDecapping_Sensor.Y_B_Limit_Sensor);
         xprintf("\t  %-42s : %10d", "xSL.CDecapping_Sensor.CT_Body_Grip_Detect_Open", xSL.CDecapping_Sensor.CT_Body_Grip_Detect_Open);
         xprintf("\t  %-42s : %10d", "xSL.CDecapping_Sensor.CT_Body_Grip_Detect_Close", xSL.CDecapping_Sensor.CT_Body_Grip_Detect_Close);
         xprintf("\t  %-42s : %10d", "xSL.CDecapping_Sensor.CT_Cap_Grip_Detect_Open", xSL.CDecapping_Sensor.CT_Cap_Grip_Detect_Open);
@@ -426,6 +444,16 @@ void CMD_Handle_Print_CD(const tsXParsedData *parsedData, U08 useTCP) {
     }
 
     if (parsedData->ParamCount == 0) {
+        XBuffer_AddString(xSendMsg,"TARGET_Z=",NO_COMMA);
+        XBuffer_AddInt(xSendMsg,xCD.Decapper.Motor_TargetPos[aZ],NO_COMMA);
+        XBuffer_AddString(xSendMsg,";TARGET_R=",NO_COMMA);
+        XBuffer_AddInt(xSendMsg,xCD.Decapper.Motor_TargetPos[aR],NO_COMMA);
+        XBuffer_AddString(xSendMsg,";SPEED=",NO_COMMA);
+        XBuffer_AddInt(xSendMsg,xCD.Decapper.SpeedPercent,NO_COMMA);
+        XBuffer_AddString(xSendMsg,";LR=",NO_COMMA);
+        CMD_Handle_GLR(parsedData,useTCP);
+        if(useTCP!=COMM_USB)return;
+
         xcprintf(ANSI_TX_LightYellow);
         xprintf("\t======================================================================");
         xprintf("\t                       [ Control Data : xCD ]                         ");
@@ -714,13 +742,13 @@ static int RPL_SetParameter(int index, const tsXParsedData *parsedData)
         return YES;
 
     case RPL_SET_DECAP_SEL_MAX_CUR_Z:
-        if (GetParamInt(parsedData, 1, &value_i) == NO || value_i < 0)
+        if (GetParamInt(parsedData, 1, &value_i) == NO || value_i < 0 || value_i > 1)
             return NO;
         xPL.Decapper.SelMaxCur[aZ] = value_i;
         return YES;
 
     case RPL_SET_DECAP_SEL_MAX_CUR_R:
-        if (GetParamInt(parsedData, 1, &value_i) == NO || value_i < 0)
+        if (GetParamInt(parsedData, 1, &value_i) == NO || value_i < 0 || value_i > 1)
             return NO;
         xPL.Decapper.SelMaxCur[aR] = value_i;
         return YES;
@@ -738,7 +766,7 @@ static int RPL_SetParameter(int index, const tsXParsedData *parsedData)
         return YES;
 
     case RPL_SET_DECAP_STEP_RESOLUTION:
-        if (GetParamInt(parsedData, 1, &value_i) == NO || value_i <= 0)
+        if (GetParamInt(parsedData, 1, &value_i) == NO || value_i < 0 || value_i > 8)
             return NO;
         xPL.Decapper.StepResolution = value_i;
         return YES;
@@ -1057,7 +1085,14 @@ void CMD_Handle_Print_PL(const tsXParsedData *parsedData, U08 useTCP) {
 
     /* Get */
     if (parsedData->ParamCount == 0) {
-        RPL_GetParameter();
+        tsXParsedData query={0};
+        query.ParamCount=1;query.Params[0].type=PARAM_TYPE_INT;
+        for(int index=RPL_SET_DECAP_RUN_CUR_Z;index<=RPL_SET_DECAP_R_POS;index++) {
+            if(index!=RPL_SET_DECAP_RUN_CUR_Z)XBuffer_AddString(xSendMsg,";",NO_COMMA);
+            query.Params[0].value._int=index;
+            CMD_Handle_PGET(&query,useTCP);
+        }
+        if(useTCP==COMM_USB)RPL_GetParameter();
 
         return;
     }
@@ -1073,7 +1108,7 @@ void CMD_Handle_Print_PL(const tsXParsedData *parsedData, U08 useTCP) {
 }
 
 /**
- * @brief ORG 요청을 등록하여 기존 HOME 좌표계의 Z=0 및 Y High 복귀를 실행하게 한다.
+ * @brief ORG 요청을 등록하여 기존 HOME 좌표계의 Z=0 및 Y Forward 복귀를 실행하게 한다.
  * HOME을 새로 수행하는 명령이 아니며 미원점 상태의 처리는 FSM이 결정한다.
  */
 void CMD_Handle_ORIGIN(const tsXParsedData *parsedData, U08 useTCP) {
@@ -1143,7 +1178,7 @@ void CMD_Handle_MOVE(const tsXParsedData *parsedData, U08 useTCP) {
 }
 
 /**
- * @brief READY 0은 공압 Y High, READY 1은 Y Low 이동을 요청한다.
+ * @brief READY 0은 공압 Y Forward, READY 1은 Y Back 이동을 요청한다.
  * Y는 pulse 위치 제어가 아니며 FSM이 리미트 센서와 타임아웃으로 완료를 판단한다.
  */
 void CMD_Handle_READY(const tsXParsedData *parsedData, U08 useTCP) {
@@ -1155,7 +1190,7 @@ void CMD_Handle_READY(const tsXParsedData *parsedData, U08 useTCP) {
         if (CMD_RejectIfDecapperBusy())
             return;
 
-        if (!CDecap_TryRequestAction((value == 1) ? ACTION_Y_L_MOVE : ACTION_Y_H_MOVE)){
+        if (!CDecap_TryRequestAction((value == 1) ? ACTION_Y_B_MOVE : ACTION_Y_F_MOVE)){
 
             XBuffer_AddString(xSendMsg, "BUSY", NO_COMMA);
 
@@ -1229,28 +1264,14 @@ void CMD_Handle_UCAP(const tsXParsedData *parsedData, U08 useTCP) {
  * @brief LR/CAPDECAPLR 요청으로 유닛 DECAP/CAP 반복 시험을 시작하게 한다.
  * FSM 진입 시 반복 횟수를 초기화하며 STOP 또는 오류로 종료한다.
  */
-void CMD_Handle_LongRun(const tsXParsedData *parsedData, U08 useTCP) {
-    /* LR : long-run 시작, 정지는 STOP 명령으로 처리 */
-    if (parsedData->ParamCount == 0) {
-        if (CMD_RejectIfDecapperBusy())
-            return;
-
-        if (!CDecap_TryRequestAction(ACTION_LONGRUN)){
-
-            XBuffer_AddString(xSendMsg, "BUSY", NO_COMMA);
-
-            return;
-
-        }
-        XBuffer_AddString(xSendMsg, "LR", NO_COMMA);
-        return;
-    }
-
-    SetErrorCode(ERROR_CODE_INVALID_ARGUMENT, __func__, __LINE__);
-    XBuffer_AddString(xSendMsg, GetErrorCode_char(), NO_COMMA);
-
-    if (parsedData->Params[0].value._int != '?')
-        xParser_HandleError(__func__, PARSER_ERR_INVALID_CMD, 0);
+void CMD_Handle_LongRun(const tsXParsedData *p, U08 useTCP) {
+    U32 limit=0;
+    if (p->ParamCount==1 && p->Params[0].type==PARAM_TYPE_INT &&
+        p->Params[0].value._int>=1 && p->Params[0].value._int<=1000000) limit=(U32)p->Params[0].value._int;
+    else if(p->ParamCount!=0) {XBuffer_AddString(xSendMsg,"INVALID",NO_COMMA);return;}
+    if(CMD_RejectIfDecapperBusy())return;
+    if(!CDecap_TryLongRun(limit)){XBuffer_AddString(xSendMsg,"BUSY",NO_COMMA);return;}
+    XBuffer_AddString(xSendMsg,"LR",NO_COMMA);
 }
 
 /**
@@ -1371,4 +1392,120 @@ void CMD_Handle_PSTA(const tsXParsedData *parsedData, U08 useTCP)
         if (parsedData->Params[0].value._int != '?')
             xParser_HandleError(__func__, PARSER_ERR_INVALID_CMD, 0);
     }
+}
+
+/* Schema 1 responses are compact command-prefixed CSV on every command transport. */
+static bool API_NoArgs(const tsXParsedData *p) {
+    if (p->ParamCount == 0) return true;
+    XBuffer_AddString(xSendMsg, "INVALID", NO_COMMA);
+    return false;
+}
+void CMD_Handle_PCONFIG(const tsXParsedData *p, U08 comm) {
+    if (!API_NoArgs(p)) return;
+    XBuffer_AddInt(xSendMsg, 1, COMMA);
+    XBuffer_AddInt(xSendMsg, RPL_SET_DECAP_RUN_CUR_Z, NO_COMMA);
+}
+void CMD_Handle_GPOS(const tsXParsedData *p, U08 comm) {
+    if (p->ParamCount!=1 || p->Params[0].type!=PARAM_TYPE_INT ||
+        (p->Params[0].value._int!='Z' && p->Params[0].value._int!='R')) {
+        XBuffer_AddString(xSendMsg, "INVALID", NO_COMMA); return;
+    }
+    int axis=p->Params[0].value._int;
+    XBuffer_AddString(xSendMsg, axis=='Z'?"Z":"R", COMMA);
+    XBuffer_AddInt(xSendMsg, TMC429_GetPosition(axis=='Z'?aZ:aR), NO_COMMA);
+}
+static void API_AddParamFloat(float value) {
+    char text[32];
+    /* Nine significant decimal digits round-trip a 32-bit float. */
+    snprintf(text,sizeof(text),"%.9g",(double)value);
+    XBuffer_AddString(xSendMsg,text,NO_COMMA);
+}
+void CMD_Handle_PGET(const tsXParsedData *p, U08 comm) {
+    if (p->ParamCount!=1 || p->Params[0].type!=PARAM_TYPE_INT) {
+        XBuffer_AddString(xSendMsg,"INVALID",NO_COMMA); return;
+    }
+    int idx=p->Params[0].value._int;
+    if (idx<RPL_SET_DECAP_RUN_CUR_Z || idx>RPL_SET_DECAP_R_POS) {
+        XBuffer_AddString(xSendMsg,"UNSUPPORTED",NO_COMMA); return;
+    }
+    XBuffer_AddInt(xSendMsg,idx,COMMA);
+    switch(idx-RPL_SET_DECAP_RUN_CUR_Z) {
+        case 0: API_AddParamFloat(xPL.Decapper.RunCur[aZ]); break;
+        case 1: API_AddParamFloat(xPL.Decapper.RunCur[aR]); break;
+        case 2: XBuffer_AddInt(xSendMsg, xPL.Decapper.SelMaxCur[aZ], NO_COMMA); break;
+        case 3: XBuffer_AddInt(xSendMsg, xPL.Decapper.SelMaxCur[aR], NO_COMMA); break;
+        case 4: XBuffer_AddInt(xSendMsg, xPL.Decapper.StopCurRate[aZ], NO_COMMA); break;
+        case 5: XBuffer_AddInt(xSendMsg, xPL.Decapper.StopCurRate[aR], NO_COMMA); break;
+        case 6: XBuffer_AddInt(xSendMsg, xPL.Decapper.StepResolution, NO_COMMA); break;
+        case 7: XBuffer_AddInt(xSendMsg, xPL.Decapper.Limit_PosZ, NO_COMMA); break;
+        case 8: XBuffer_AddInt(xSendMsg, xPL.Decapper.Limit_PosR, NO_COMMA); break;
+        case 9: XBuffer_AddInt(xSendMsg, xPL.Decapper.SwNegLimit[aZ], NO_COMMA); break;
+        case 10: XBuffer_AddInt(xSendMsg, xPL.Decapper.SwPosLimit[aZ], NO_COMMA); break;
+        case 11: XBuffer_AddInt(xSendMsg, xPL.Decapper.SwNegLimit[aR], NO_COMMA); break;
+        case 12: XBuffer_AddInt(xSendMsg, xPL.Decapper.SwPosLimit[aR], NO_COMMA); break;
+        case 13: XBuffer_AddInt(xSendMsg, xPL.Decapper.SoftLimitEnable, NO_COMMA); break;
+        case 14: XBuffer_AddInt(xSendMsg, xPL.Decapper.ZDecapAcc, NO_COMMA); break;
+        case 15: XBuffer_AddInt(xSendMsg, xPL.Decapper.ZDecapVel, NO_COMMA); break;
+        case 16: XBuffer_AddInt(xSendMsg, xPL.Decapper.ZCap_UpPos, NO_COMMA); break;
+        case 17: XBuffer_AddInt(xSendMsg, xPL.Decapper.ZCap_SidePos, NO_COMMA); break;
+        case 18: XBuffer_AddInt(xSendMsg, xPL.Decapper.ZCap_Origin_Position, NO_COMMA); break;
+        case 19: XBuffer_AddInt(xSendMsg, xPL.Decapper.RDecapAcc, NO_COMMA); break;
+        case 20: XBuffer_AddInt(xSendMsg, xPL.Decapper.RDecapVel, NO_COMMA); break;
+        case 21: XBuffer_AddInt(xSendMsg, xPL.Decapper.RDecapPos, NO_COMMA); break;
+    }
+}
+
+void CMD_Handle_TEACH(const tsXParsedData *p, U08 comm) {
+    if (p->ParamCount!=2 || p->Params[0].type!=PARAM_TYPE_INT || p->Params[1].type!=PARAM_TYPE_INT) {
+        XBuffer_AddString(xSendMsg,"INVALID",NO_COMMA); return;
+    }
+    int idx=p->Params[0].value._int, value=p->Params[1].value._int;
+    bool isZ=idx==RPL_SET_DECAP_Z_CAP_UP_POS || idx==RPL_SET_DECAP_Z_CAP_SIDE_POS || idx==RPL_SET_DECAP_Z_ORIGIN_POS;
+
+    if (!isZ && idx!=RPL_SET_DECAP_R_POS) {
+        XBuffer_AddString(xSendMsg,"UNSUPPORTED",NO_COMMA); return;
+    }
+    if (!CDecap_BeginMaintenance()) { XBuffer_AddString(xSendMsg,"BUSY",NO_COMMA); return; }
+    if (!CDecap_IsValidTarget(isZ?aZ:aR,value)) {
+        CDecap_EndMaintenance();XBuffer_AddString(xSendMsg,"RANGE",NO_COMMA);return;
+    }
+
+    bool ok=RPL_SetParameter(idx,p)==YES;
+    if(ok) gZCapUpPosSavePending=false;
+    CDecap_EndMaintenance();
+    XBuffer_AddString(xSendMsg,ok?"OK":"INVALID",NO_COMMA);
+}
+
+void CMD_Handle_GSTATE(const tsXParsedData *p, U08 comm) {
+    if(!API_NoArgs(p))return;
+    CDecap_ReportError();
+    XBuffer_AddInt(xSendMsg,xSL.isBusy,COMMA);
+    XBuffer_AddInt(xSendMsg,xSL.isHomed,COMMA);
+    XBuffer_AddInt(xSendMsg,xSL.isError,COMMA);
+    XBuffer_AddInt(xSendMsg,CDecap_IsPaused(),COMMA);
+    XBuffer_AddInt(xSendMsg,CDecap_GetPhase(),COMMA);
+    XBuffer_AddInt(xSendMsg,CDecap_IsIdle(),COMMA);
+    XBuffer_AddString(xSendMsg,GetErrorCode_char(),COMMA);
+    XBuffer_AddUInt(xSendMsg,CDecap_GetOperationId(),COMMA);
+    XBuffer_AddInt(xSendMsg,CDecap_GetOperationResult(),NO_COMMA);
+}
+void CMD_Handle_GSENSOR(const tsXParsedData *p, U08 comm) {
+    if(!API_NoArgs(p))return;
+    XBuffer_AddInt(xSendMsg,xSL.CDecapping_Sensor.CT_Detect_Sensor,COMMA);
+    XBuffer_AddInt(xSendMsg,xSL.CDecapping_Sensor.Z_H_Limit_Sensor,COMMA);
+    XBuffer_AddInt(xSendMsg,xSL.CDecapping_Sensor.Z_L_Limit_Sensor,COMMA);
+    XBuffer_AddInt(xSendMsg,xSL.CDecapping_Sensor.Y_F_Limit_Sensor,COMMA);
+    XBuffer_AddInt(xSendMsg,xSL.CDecapping_Sensor.Y_B_Limit_Sensor,COMMA);
+    XBuffer_AddInt(xSendMsg,xSL.CDecapping_Sensor.CT_Cap_Grip_Detect_Open,COMMA);
+    XBuffer_AddInt(xSendMsg,xSL.CDecapping_Sensor.CT_Cap_Grip_Detect_Close,COMMA);
+    XBuffer_AddInt(xSendMsg,xSL.CDecapping_Sensor.CT_Body_Grip_Detect_Open,COMMA);
+    XBuffer_AddInt(xSendMsg,xSL.CDecapping_Sensor.CT_Body_Grip_Detect_Close,NO_COMMA);
+}
+void CMD_Handle_GLR(const tsXParsedData *p, U08 comm) {
+    if(!API_NoArgs(p))return;
+    XBuffer_AddUInt(xSendMsg,xCD.Decapper.LongRunCount,COMMA);
+    XBuffer_AddUInt(xSendMsg,CDecap_GetLongRunLimit(),COMMA);
+    XBuffer_AddInt(xSendMsg,xCD.Decapper.phaseDecapCap,COMMA);
+    XBuffer_AddInt(xSendMsg,CDecap_IsPaused(),COMMA);
+    XBuffer_AddInt(xSendMsg,xSL.isBusy,NO_COMMA);
 }

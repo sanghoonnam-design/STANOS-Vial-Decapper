@@ -10,6 +10,7 @@
 #include "XGlobal.h"
 
 BOOL Network_TCP_DebugSend(const uint8_t *msg, size_t len);
+void Network_ResetReceive(int socketId);
 void Network_MsgProcess(int MsgId, int MsgLength, char *pData);
 // void Network_CmdProcess(int CmdId, int Index, float NewValue);
 

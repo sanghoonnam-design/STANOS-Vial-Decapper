@@ -17,6 +17,13 @@ extern const tsXCommandMapping gModuleCommandTable[];
 extern const int gModuleCommandCount;
 extern bool gZCapUpPosSavePending;
 extern S32 gZCapUpPosPendingValue;
+void CMD_Handle_GPOS(const tsXParsedData *, U08);
+void CMD_Handle_TEACH(const tsXParsedData *, U08);
+void CMD_Handle_PGET(const tsXParsedData *, U08);
+void CMD_Handle_PCONFIG(const tsXParsedData *, U08);
+void CMD_Handle_GSTATE(const tsXParsedData *, U08);
+void CMD_Handle_GSENSOR(const tsXParsedData *, U08);
+void CMD_Handle_GLR(const tsXParsedData *, U08);
 
 typedef enum
 {
@@ -113,11 +120,11 @@ void CMD_Handle_Print_CD(const tsXParsedData *parsedData, U08 useTCP);
 /** @brief PL 조회, USB 도움말, 두 인자 설정을 분기한다. */
 void CMD_Handle_Print_PL(const tsXParsedData *parsedData, U08 useTCP);
 
-/** @brief ORG 요청을 등록하여 기존 HOME 좌표계의 Z=0 및 Y High 복귀를 실행하게 한다. */
+/** @brief ORG 요청을 등록하여 기존 HOME 좌표계의 Z=0 및 Y Forward 복귀를 실행하게 한다. */
 void CMD_Handle_ORIGIN(const tsXParsedData *parsedData, U08 useTCP);
 /** @brief MOVE의 상대/절대 모드(R/A), 축(Z/R), pulse 값을 확인하여 CD에 저장하고 요청한다. */
 void CMD_Handle_MOVE(const tsXParsedData *parsedData, U08 useTCP);
-/** @brief READY 0은 공압 Y High, READY 1은 Y Low 이동을 요청한다. */
+/** @brief READY 0은 공압 Y Forward, READY 1은 Y Back 이동을 요청한다. */
 void CMD_Handle_READY(const tsXParsedData *parsedData, U08 useTCP);
 
 /** @brief Y/Body 자동 준비 과정을 생략하는 유닛 DECAP 시험 요청을 등록한다. */

@@ -11,6 +11,7 @@
  *
  ******************************************************************************/
 #include "XEEPROMParam.h"
+static bool sLastSaveOK = false;
 #include "_01_XSystemManagement.h"
 #include "XSystemInfo.h"
 #include "XModbus.h"
@@ -299,7 +300,7 @@ void EEPROMPL_SaveToEEPROM(void)
 
     gEEPROM.crc = CRC_Calculate((U8 *)&gEEPROM, sizeof(tsEEPROM_Config) - sizeof(U16)); // crc 갱신
 
-    EEPROM_WriteBlock(newBlock, &gEEPROM);
+    sLastSaveOK = EEPROM_WriteBlock(newBlock, &gEEPROM);
 
     uint32_t elapsedTime = HAL_GetTick() - startTime;
     LOG_MSG_SEND("Writing to new block %d with updateCount %d. - completed in %lu ms", newBlock, gEEPROM.updateCount, elapsedTime);
@@ -378,12 +379,11 @@ static bool ValidateEEPROMData(tsEEPROM_Config *config)
     return (calculatedCRC == config->crc);
 }
 #else // 임시 사용
-static bool ValidateEEPROMData(tsEEPROM_Config *config)
-{
-    if (IsFactorySetting(config))
-        isEEPROM_OK = YES;
-
-    return isEEPROM_OK;
+static bool ValidateEEPROMData(tsEEPROM_Config *config) {
+    bool valid=config && IsFactorySetting(config) &&
+        CRC_Calculate((U8*)config,sizeof(tsEEPROM_Config)-sizeof(config->crc))==config->crc;
+    isEEPROM_OK=valid?YES:NO;
+    return valid;
 }
 #endif
 
@@ -529,7 +529,7 @@ static bool EEPROM_WriteBlock(U08 blockIndex, const tsEEPROM_Config *config)
     // [2] 백업 블록의 데이터가 정상적으로 쓰였는지 확인
     static tsEEPROM_Config verifyConfig;
     EEPROM_ReadBytes(backupAddress, (U08 *)&verifyConfig, sizeof(tsEEPROM_Config));
-    if (!ValidateEEPROMData(&verifyConfig))
+    if (!ValidateEEPROMData(&verifyConfig) || memcmp(&verifyConfig, config, sizeof(*config)) != 0)
     {
         ERR_MSG_SEND("Backup block validation failed!");
         return false; // 백업 블록이 손상되었으면 저장 중단
@@ -546,7 +546,8 @@ static bool EEPROM_WriteBlock(U08 blockIndex, const tsEEPROM_Config *config)
 
     xprintf("Successfully wrote block %d (Backup Block %d)...\r\n", blockIndex, backupBlock);
 
-    return true;
+    EEPROM_ReadBytes(mainAddress, (U08 *)&verifyConfig, sizeof(verifyConfig));
+    return ValidateEEPROMData(&verifyConfig) && memcmp(&verifyConfig, config, sizeof(*config)) == 0;
 }
 #endif
 
@@ -679,4 +680,11 @@ void EEPROMPL_PrintEepromStructure_user(void) // 디버깅 코드
     // @USER CODE END
 
     xprintf("  [--]%08X, %08X : gEEPROM.crc", gEEPROM.crc, gEEPROM.crc);
+}
+
+/* Success includes CRC and exact readback of both EEPROM copies. */
+bool EEPROMPL_SaveVerified(void) {
+    sLastSaveOK = false;
+    EEPROMPL_SaveToEEPROM();
+    return sLastSaveOK;
 }

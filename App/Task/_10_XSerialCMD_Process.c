@@ -48,12 +48,20 @@ VOID TASK_SerialCommandLoop(void *pvParameters)
                 {
                     char dataBuffer[BUFFER_SIZE_RX_MSG] = {0};
                     U16 dataSize = xQueue_GetSize(&CommandQueue);
+                    if(dataSize==0 || dataSize>sizeof(dataBuffer)-3) {
+                        /* LF was consumed: reject this whole frame without draining the next one. */
+                        xQueue_Clear(&CommandQueue);
+                        receivedCR=false;
+                        continue;
+                    }
 
                     // 링버퍼에서 데이터를 읽어와 null-terminated(\0) 문자열로 구성
                     for (int i = 0; i < dataSize; i++)
                     {
                         xQueue_Pop(&CommandQueue, (U08 *)&dataBuffer[i]);
                     }
+                    dataBuffer[dataSize++] = '\r';
+                    dataBuffer[dataSize++] = '\n';
                     dataBuffer[dataSize] = '\0';
 
                     // 데이터 처리

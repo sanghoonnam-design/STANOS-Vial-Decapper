@@ -49,7 +49,7 @@ typedef struct
 
 typedef struct
 {
-    char RawBuffer[50];
+    char RawBuffer[BUFFER_SIZE_RX_MSG];
     char Command[MAX_CMD_LEN];
     tsParam Params[MAX_PARAMS]; // 파라미터 배열 (int 또는 float 지원)
     int ParamCount;

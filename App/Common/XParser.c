@@ -6,6 +6,9 @@
  *
  ******************************************************************************/
 #include "XParser.h"
+#include <errno.h>
+#include <limits.h>
+#include <math.h>
 #include "XDebug.h"
 
 tsXParsedData xParsedData_RS232C;  // Serial Command 파싱된 데이터
@@ -16,7 +19,7 @@ static teXParsingErrorCode xParser_ParseCommand( // 명령어와 파라미터를
     const char *buffer,                          //
     tsXParsedData *data);                        //
 static int xParser_IsValidChar(char c);          // 유효한 문자인지 확인하는 함수
-static void xParser_TrimNewline(char *str);      // CR/LF 문자를 제거하는 함수
+static void __attribute__((unused)) xParser_TrimNewline(char *str);
 #if 0
 static teXParsingErrorCode xParser_DetectNoise(const char *buffer);  // 노이즈가 있는지 체크하는 함수 (노이즈 감지)
 #endif
@@ -27,13 +30,13 @@ U08 DB_isPrintParsingDataEnabled = NO; // 디버깅 코드: 파싱데이터를 d
 // 노이즈 필터링 : 유효한 문자인지 확인하는 함수
 static int xParser_IsValidChar(char c)
 {
-    return isalnum(c) || c == ' ' || c == ',' || c == '.' || c == '-' || c == '_' ||
+    return isalnum((unsigned char)c) || c == ' ' || c == ',' || c == '.' || c == '-' || c == '+' || c == '_' ||
            c == '\r' || c == '\n' || c == '?' || c == 'h' || c == 'H' ||
            c == 's' || c == 'S';
 }
 
 // CR/LF 문자를 제거하는 함수
-static void xParser_TrimNewline(char *str)
+static void __attribute__((unused)) xParser_TrimNewline(char *str)
 {
     if (str == NULL || strlen(str) == 0)
         return;
@@ -143,253 +146,65 @@ static teXParsingErrorCode xParser_ParseCommand(const char *buffer, tsXParsedDat
 }
 #else
 
-static teXParsingErrorCode xParser_ParseCommand(const char *buffer, tsXParsedData *data)
-{
-    char tempBuffer[BUFFER_SIZE_RX_MSG];
-
-    strncpy(tempBuffer, buffer, BUFFER_SIZE_RX_MSG);
-    tempBuffer[BUFFER_SIZE_RX_MSG - 1] = '\0';
-    xParser_TrimNewline(tempBuffer);
-
-    // 파라미터 초기화
-    for (int i = 0; i < MAX_PARAMS; i++)
-    {
-        data->Params[i].type = PARAM_TYPE_NONE;
-        data->Params[i].value._int = 0;
+static teXParsingErrorCode xParser_ParseCommand(const char *buffer, tsXParsedData *data) {
+    const char *p = buffer;
+    while (*p == ' ') ++p;
+    int length = 0;
+    while (*p && *p != ' ') {
+        if (length >= MAX_CMD_LEN-1) return PARSER_ERR_INVALID_CMD;
+        data->Command[length++] = UPCASE(*p++);
     }
+    data->Command[length] = '\0';
+    if (!length) return PARSER_ERR_INVALID_CMD;
     data->ParamCount = 0;
-
-    char *p = tempBuffer;
-
-    // 앞 공백 스킵
-    while (*p == ' ')
-        p++;
-
-    if (*p == '\0')
-        return PARSER_ERR_INVALID_CMD;
-
-    // ---------------------------------------------------------
-    // COMMAND 파싱
-    // ---------------------------------------------------------
-    int cmdLen = 0;
-    while (*p != ' ' && *p != '\0')
-    {
-        if (cmdLen < MAX_CMD_LEN - 1)
-            data->Command[cmdLen++] = UPCASE(*p);
-        p++;
-    }
-    data->Command[cmdLen] = '\0';
-
-    // COMMAND 뒤 공백 스킵
-    while (*p == ' ')
-        p++;
-
-    // 파라미터가 없는 경우
-    if (*p == '\0')
-        return PARSER_ERR_SUCCESS;
-
-    // ---------------------------------------------------------
-    // PARAM 파싱 시작
-    // ---------------------------------------------------------
-    int paramIndex = 0;
-    char tokenBuf[64];
-    int tLen = 0;
-    bool hasDot = false;
-
-    while (1)
-    {
-        char ch = *p;
-        bool isEnd   = (ch == '\0');
-        bool isComma = (ch == ',');
-        bool isSpace = (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n');
-
-        // -----------------------------------------------------
-        // 구분자(콤마/EOF/공백)에 도달한 경우 → 토큰 종료
-        // -----------------------------------------------------
-        if (isComma || isEnd || isSpace)
-        {
-            // 공백만 있는 토큰이면 tLen == 0일 수 있음
-            while (tLen > 0 && tokenBuf[tLen - 1] == ' ')
-                tLen--;
-
-            if (tLen == 0)
-            {
-                // 빈 파라미터(NONE)
-                data->Params[paramIndex].type = PARAM_TYPE_NONE;
-                data->Params[paramIndex].value._int = 0;
-            }
-            else
-            {
-                // 토큰 종료
-                tokenBuf[tLen] = '\0';
-
-                // HELP 처리
-                if (paramIndex == 0 &&
-                    (!strcmp(tokenBuf, "?") || !strcmp(tokenBuf, "H") ||
-                     !strcmp(tokenBuf, "h") || !strcmp(tokenBuf, "S") || !strcmp(tokenBuf, "s")))
-                {
-                    data->Params[0].type = PARAM_TYPE_INT;
-                    data->Params[0].value._int = tokenBuf[0];
-                    data->ParamCount = 1;
-                    return PARSER_ERR_SUCCESS;
-                }
-
-                // 한 글자 영문 파라미터는 대문자 ASCII 값으로 저장
-                if ((tLen == 1) && isalpha((unsigned char)tokenBuf[0]))
-                {
-                    data->Params[paramIndex].type = PARAM_TYPE_INT;
-                    data->Params[paramIndex].value._int = UPCASE(tokenBuf[0]);
-                }
-                // FLOAT 또는 INT 파싱
-                else
-                {
-                    char *endptr;
-                    if (hasDot)
-                    {
-                        float fv = strtof(tokenBuf, &endptr);
-                        if (*endptr != '\0')
-                            return PARSER_ERR_INVALID_CMD;
-
-                        data->Params[paramIndex].type = PARAM_TYPE_FLOAT;
-                        data->Params[paramIndex].value._float = fv;
-                    }
-                    else
-                    {
-                        int iv = strtol(tokenBuf, &endptr, 10);
-                        if (*endptr != '\0')
-                            return PARSER_ERR_INVALID_CMD;
-
-                        data->Params[paramIndex].type = PARAM_TYPE_INT;
-                        data->Params[paramIndex].value._int = iv;
-                    }
-                }
-            }
-
-            // 파라미터 카운트 증가
-            paramIndex++;
-            data->ParamCount = paramIndex;
-
-            // 파라미터 최대치 검사
-            if (paramIndex >= MAX_PARAMS)
-                break;
-
-            // 마지막이면 종료
-            if (isEnd)
-                break;
-
-            // 다음 토큰 준비
-            tLen = 0;
-            hasDot = false;
-
-            // 공백의 경우는 단순 스킵
-            if (isSpace)
-            {
-                p++;
-                continue;
-            }
-
-            // 콤마인 경우 다음 문자로 이동
-            if (isComma)
-            {
-                p++;
-                continue;
+    while (*p) {
+        while (*p == ' ' || *p == ',') ++p;
+        if (!*p) break;
+        if (data->ParamCount >= MAX_PARAMS) return PARSER_ERR_INVALID_CMD;
+        char token[64]; int n = 0;
+        while (*p && *p != ' ' && *p != ',') {
+            if (n >= (int)sizeof(token)-1) return PARSER_ERR_INVALID_CMD;
+            token[n++] = *p++;
+        }
+        token[n] = '\0';
+        tsParam *param = &data->Params[data->ParamCount++];
+        if (n == 1 && (isalpha((unsigned char)token[0]) || token[0] == '?')) {
+            param->type = PARAM_TYPE_INT;
+            param->value._int = UPCASE(token[0]);
+        } else {
+            char *end;
+            errno = 0;
+            if (strchr(token, '.') || strchr(token, 'e') || strchr(token, 'E')) {
+                float value = strtof(token, &end);
+                if (*end || errno == ERANGE || !isfinite(value)) return PARSER_ERR_INVALID_CMD;
+                param->type = PARAM_TYPE_FLOAT;
+                param->value._float = value;
+            } else {
+                long value = strtol(token, &end, 10);
+                if (*end || errno == ERANGE || value < INT_MIN || value > INT_MAX) return PARSER_ERR_INVALID_CMD;
+                param->type = PARAM_TYPE_INT;
+                param->value._int = (int)value;
             }
         }
-        else
-        {
-            if (ch == '.')
-                hasDot = true;
-
-            if (!isSpace && tLen < (int)sizeof(tokenBuf) - 1)
-            {
-                tokenBuf[tLen++] = ch;
-            }
-        }
-
-        p++;
     }
-
     return PARSER_ERR_SUCCESS;
 }
 #endif
 
 // 시리얼 데이터를 처리하고 노이즈 필터링하는 함수: 2중 처리
-teXParsingErrorCode xParser_ProcessReceivedData(const char *rxBuffer, tsXParsedData *parsedData, bool useTCP)
-{
-    char cleanBuffer[BUFFER_SIZE_RX_MSG] = {0};
-    int bufferIndex = 0;
-    BOOL crDetected = false; // CR(\r)을 감지했는지 여부
-
-
-    /*[1]. 노이즈 필터링 및 CR-LF 시퀀스 확인 */
-    for (int i = 0; rxBuffer[i] != '\0' && bufferIndex < BUFFER_SIZE_RX_MSG; i++)
-    {
-        char ch = rxBuffer[i];
-
-        if (crDetected)
-        {
-            if (ch == '\n')
-            {
-                strncpy(parsedData->RawBuffer, cleanBuffer, bufferIndex);
-                
-                parsedData->RawBuffer[bufferIndex] = '\0';
-                break;
-            }
-            else
-            {
-                xParser_HandleError(__func__, PARSER_ERR_NOISE_DETECTED, 1);
-                return PARSER_ERR_NOISE_DETECTED; // CR 뒤에 LF가 오지 않으면 잘못된 시퀀스이므로 에러 처리
-            }
-        }
-
-        // 유효한 문자인지 확인 : 노이즈 체크
-        if (xParser_IsValidChar(ch))
-        {
-            if (ch == '\r') // CR을 감지하면 플래그 설정
-            {
-                crDetected = true; // CR 감지 플래그 설정
-            }
-            else
-            {
-                cleanBuffer[bufferIndex++] = ch; // 유효한 문자는 버퍼에 저장
-            }
-        }
-        else
-        {
-            xParser_HandleError(__func__, PARSER_ERR_NOISE_DETECTED, 2);
-            return PARSER_ERR_NOISE_DETECTED; // 유효하지 않은 문자는 노이즈로 처리
-        }
-
-        if (bufferIndex >= BUFFER_SIZE_RX_MSG)
-        {
-            xParser_HandleError(__func__, PARSER_ERR_INVALID_CMD, 3);
-            return PARSER_ERR_INVALID_CMD; // 버퍼 오버플로우 방지
-        }
-    }
-
-    // if (useTCP == COMM_RS232C && crDetected && bufferIndex == 0)  // CR-LF가 연속적으로 오지 않았다면 에러 처리
-    if (crDetected && bufferIndex == 0) // CR-LF가 연속적으로 오지 않았다면 에러 처리
-    {
-        xParser_HandleError(__func__, PARSER_ERR_NOISE_DETECTED, 4);
-        return PARSER_ERR_NOISE_DETECTED;
-    }
-
-    /*[2]. 명령어 파싱 성공 후 crDetected 초기화 */
-    teXParsingErrorCode result = xParser_ParseCommand(cleanBuffer, parsedData);
-
-    /** ***********************************************************
-     *  @brief for debugging, 파싱 결과 확인할때 사용
-     * ************************************************************/
-    if (DB_isPrintParsingDataEnabled)
-    {
-        xParser_PrintParsedData(parsedData);
-    }
-
-    if (result == PARSER_ERR_SUCCESS)
-    {
-        crDetected = false; // 명령어가 성공적으로 처리되면 플래그 초기화
-    }
-
+teXParsingErrorCode xParser_ProcessReceivedData(const char *rxBuffer, tsXParsedData *parsedData, bool useTCP) {
+    (void)useTCP;
+    if (!rxBuffer || !parsedData) return PARSER_ERR_INVALID_CMD;
+    size_t length = strlen(rxBuffer);
+    if (length < 3 || length >= BUFFER_SIZE_RX_MSG ||
+        rxBuffer[length-2] != '\r' || rxBuffer[length-1] != '\n') return PARSER_ERR_INVALID_CMD;
+    for (size_t i=0; i<length-2; ++i)
+        if (!xParser_IsValidChar(rxBuffer[i]) || rxBuffer[i]=='\r' || rxBuffer[i]=='\n')
+            return PARSER_ERR_NOISE_DETECTED;
+    memset(parsedData, 0, sizeof(*parsedData));
+    memcpy(parsedData->RawBuffer, rxBuffer, length-2);
+    teXParsingErrorCode result=xParser_ParseCommand(parsedData->RawBuffer, parsedData);
+    if(result==PARSER_ERR_SUCCESS && DB_isPrintParsingDataEnabled)xParser_PrintParsedData(parsedData);
     return result;
 }
 

@@ -52,6 +52,19 @@ static uint8_t historyCount = 0;                             // 현재 저장된
 
 char inputBuffer[__CLI_MAX_CMD_LENGTH]; // 현재 입력 상태
 uint16_t inputIndex = 0;                // 입력 글자 인덱스
+static bool sInputOverflow;
+
+/* Normalize either Enter key to the parser's complete CRLF frame. */
+static bool CLI_FinalizeInput(void) {
+    if(sInputOverflow || inputIndex>sizeof(inputBuffer)-3) {
+        inputIndex=0;inputBuffer[0]='\0';sInputOverflow=false;
+        return false;
+    }
+    inputBuffer[inputIndex++]='\r';
+    inputBuffer[inputIndex++]='\n';
+    inputBuffer[inputIndex]='\0';
+    return true;
+}
 
 static void CLI_UART_RxCallback(U8 data); /** @note : IUART1_Callback() */
 U08 gNewLine = NO;
@@ -165,12 +178,11 @@ VOID Task_USBCommandLineInterface(void *pvParameters)
             // 1단계 입력 처리
             if (c == '\r' || c == '\n') // Enter 입력 (명령어 입력 완료)
             {
-                if (c == '\r') // CR, LF 붙이기 마무리 작업
-                {
-                    inputBuffer[inputIndex++] = c; // CR 입력
+                if(!CLI_FinalizeInput()) {
+                    ERR_MSG_SEND("CLI command too long; discarded.");
+                    xQueueReset(xQueue_rxCLI);
+                    continue;
                 }
-                inputBuffer[inputIndex++] = '\n'; // LF 입력, 사실 원칙적으로는 LF가 들어오면 앞에 CR이 있는지 조사하고 처리해야함.
-                inputBuffer[inputIndex] = '\0';   // 마무리
 
                 if (inputIndex > 2) // CR,LF이 기본으로 추가됨. 2:엔터 에러 방지
                 {
@@ -298,11 +310,12 @@ VOID Task_USBCommandLineInterface(void *pvParameters)
             /***********************************************************************************/
             else if (c >= 32 && c <= 126) // 콘솔창 처리: 일반 문자 echo 처리
             {
-                if (inputIndex < __CLI_MAX_CMD_LENGTH - 1)
+                if (inputIndex < __CLI_MAX_CMD_LENGTH - 3)
                 {
                     inputBuffer[inputIndex++] = c;
                     xcprintf("%c", c); // echo
                 }
+                else sInputOverflow=true;
             }
             /***********************************************************************************/
 

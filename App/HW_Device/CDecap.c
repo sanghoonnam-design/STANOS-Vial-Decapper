@@ -47,6 +47,9 @@ static U32 Step_StartTick = 0;
 static Pause_Context_t PauseContext;
 static volatile bool sStopRequested = false;
 static volatile bool sMaintenance = false;
+static U32 sLongRunLimit = 0U; /* zero retains legacy unlimited LR */
+static U32 sOperationId = 0U;
+static int sOperationResult = 0; /* 0:none, 1:accepted/running, 2:finished, 3:stopped, 4:fault */
 static teErrorCode sFaultCode = ERROR_CODE_NONE;
 /* 명령 발행 시의 절대 목표를 보존한다. 정지 신호만으로 완료 처리하지 않는다. */
 static S32 sMoveTarget[STEP_CH_MAX];
@@ -68,8 +71,8 @@ static int CDecap_CheckTimeout(U32 timeout_ms);
 
 static void CDecap_Idle(void);
 
-static void Air_Y_High(void);
-static void Air_Y_Low(void);
+static void Air_Y_Forward(void);
+static void Air_Y_Back(void);
 
 static void CDecap_Relmove(unsigned char Idx, unsigned char ch, unsigned int  Acc, unsigned int Vel, S32 Pos, S32 limit);
 static void CDecap_Absmove(unsigned char Idx, unsigned char ch, unsigned int  Acc, unsigned int Vel, S32 Pos, S32 limit);
@@ -96,8 +99,8 @@ static void CDecap_Relmove_Z(void);
 static void CDecap_RRotate(void);
 static void CDecap_ARotate(void);
 
-static void Air_Y_High_Move(void);
-static void Air_Y_Low_Move(void);
+static void Air_Y_Forward_Move(void);
+static void Air_Y_Back_Move(void);
 static void Air_Y_StopOutput(void);
 static void Air_Y_Stop(void);
 
@@ -105,8 +108,14 @@ static void UCDecap_Capping(void);
 static void UCDecap_Decapping(void);
 static void UCDecap_CDecap_Longrun(void);
 
-static void Air_CTBody_Gripper(unsigned char onoff);
-static void Air_CTCap_Gripper(unsigned char onoff);
+typedef enum{
+    CT_GRIP_RELEASE = OFF,
+    CT_GRIP_ENGAGE = ON,
+    CT_GRIP_STANDBY
+} teCTGripOutput;
+
+static void Air_CTBody_Gripper(teCTGripOutput mode);
+static void Air_CTCap_Gripper(teCTGripOutput mode);
 
 /* FSM 종료 및 비정상 처리 보조 함수 */
 static void FSM_End_ok(void);
@@ -122,8 +131,10 @@ static void ResetPauseContext(void);
  * 이때의 0은 기구 원점 확정이 아니므로 isHomed는 false이며 HOME이 별도로 필요하다.
  */
 void CDecap_Init(void){
+    sLongRunLimit = 0U;
+    sOperationResult = 0;
     sStopRequested = false;
-    sMaintenance = false;
+    /* Keep an existing maintenance lock through idle LOAD reconfiguration. */
     sFaultCode = ERROR_CODE_NONE;
 	sMotionLimit_t MotionLimit;
 	sMotionSwLimitPos_t MotionSwLimitPos;
@@ -135,7 +146,7 @@ void CDecap_Init(void){
 	/* 상태 갱신 콜백 등록 */
 	xCDecap.Senser_Update /*            */= CDecap_Sensor_Update;
 	xCDecap.Status_Update /*            */= YZ_Motor_Status_Update;
-	xCDecap.CT_Cap_Body_Update /*       */= Cap_CAP_Body_Detect_Sensor;
+
 	/* 센서 진단 콜백 등록 */
 	xCDecap.CheckSensorValidity /*      */=	CDecapping_CheckSensorValidity;
 	/* 디캐퍼 상태 머신 콜백 등록 */
@@ -175,8 +186,8 @@ void CDecap_Init(void){
 		TMC429_SetPosition(ch, 0); /* HOMING에서 기준 위치를 다시 설정한다. */
 	}
 	/* 공압 그리퍼 초기 상태 */
-	Air_CTBody_Gripper(OFF);
-	Air_CTCap_Gripper(OFF);
+	Air_CTBody_Gripper(CT_GRIP_RELEASE);
+	Air_CTCap_Gripper(CT_GRIP_RELEASE);
 
     ResetAllSubPhases();
     sPhase = DFSM_IDLE;
@@ -194,9 +205,9 @@ void CDecap_Sensor_Update(void) {
 	//Z축 SENSOR 확인 (HIGH/LOW)
 	xSL.CDecapping_Sensor.Z_H_Limit_Sensor = (IOEXP_ReadIObit(READ_IN, Z_H_SENSOR_PIN) == GPIO_PIN_SET) ? 1 : 0;
 	xSL.CDecapping_Sensor.Z_L_Limit_Sensor = (IOEXP_ReadIObit(READ_IN, Z_L_SENSOR_PIN) == GPIO_PIN_SET) ? 1 : 0;
-	//Y축 SENSOR 확인 (HIGH/LOW)
-	xSL.CDecapping_Sensor.Y_H_Limit_Sensor = (IOEXP_ReadIObit(READ_IN, Y_H_SENSOR_PIN) == GPIO_PIN_SET) ? 1 : 0;
-	xSL.CDecapping_Sensor.Y_L_Limit_Sensor = (IOEXP_ReadIObit(READ_IN, Y_L_SENSOR_PIN) == GPIO_PIN_SET) ? 1 : 0;
+	//Y축 센서 확인 (Forward/Back)
+	xSL.CDecapping_Sensor.Y_F_Limit_Sensor = (IOEXP_ReadIObit(READ_IN, Y_F_SENSOR_PIN) == GPIO_PIN_SET) ? 1 : 0;
+	xSL.CDecapping_Sensor.Y_B_Limit_Sensor = (IOEXP_ReadIObit(READ_IN, Y_B_SENSOR_PIN) == GPIO_PIN_SET) ? 1 : 0;
 	//CT Body를 잡는지 확인 (OPEN/CLOSE)
 	xSL.CDecapping_Sensor.CT_Body_Grip_Detect_Open = (IOEXP_ReadIObit(READ_IN, CT_BODY_GRIP_OPEN_SENSOR_PIN) == GPIO_PIN_SET) ? 1 : 0;
 	xSL.CDecapping_Sensor.CT_Body_Grip_Detect_Close = (IOEXP_ReadIObit(READ_IN, CT_BODY_GRIP_CLOSE_SENSOR_PIN) == GPIO_PIN_SET) ? 1 : 0;
@@ -216,45 +227,32 @@ void YZ_Motor_Status_Update(void){
 	xSL.xZ_Motor_Run.Motor_Run = (TMC2660_GetMotorRun(aZ) == 1) ? 1 : 0;
 	xSL.xR_Motor_Run.Motor_Run = (TMC2660_GetMotorRun(aR) == 1) ? 1 : 0;
 }
-/* 그리퍼 센서로부터 Body/Cap 보유 상태를 갱신한다. */
-/**
- * @brief 그리퍼의 Open/Close 입력이 모두 0이면 물체를 잡은 상태로 해석한다.
- * 이 판정으로 xSL.Decapper의 Body_is와 Cap_is를 갱신한다. 별도 CT 감지 입력 판정과는 구분한다.
- */
-void Cap_CAP_Body_Detect_Sensor(void){
-	//CT를 잡고 있는지
-	if(xSL.CDecapping_Sensor.CT_Body_Grip_Detect_Open == false
-			&& xSL.CDecapping_Sensor.CT_Body_Grip_Detect_Close == false){
-		xSL.Decapper.Body_is = true;
-	}
-	else {
-		xSL.Decapper.Body_is = false;
-	}
-	//현재 Cap을 가지고 있는지 확인
-	if(xSL.CDecapping_Sensor.CT_Cap_Grip_Detect_Open == false
-			&& xSL.CDecapping_Sensor.CT_Cap_Grip_Detect_Close == false){
-		xSL.Decapper.Cap_is = true;
-	}
-	else{
-		xSL.Decapper.Cap_is = false;
-	}
-}
 /* 센서 진단 */
 /**
- * @brief 센서 조합의 이상을 xSL.Decapper 오류 플래그에 누적한다.
+ * @brief 그리퍼 보유 상태를 갱신하고 센서 조합의 이상을 오류 플래그에 누적한다.
+ * Cap은 Open/Close가 모두 0이면 보유로 판단한다. Vial은 Forward에서만 확인한다.
  * Z/Y 리미트가 모두 0이거나 그리퍼 Open/Close가 모두 1이면 해당 오류를 설정한다.
  * 정상 입력으로 돌아와도 자동 해제하지 않는다. 이 센서 오류를 정지에 연결하는 FSM 인터록은 현재 주석 처리되어 있다.
  */
 void CDecapping_CheckSensorValidity(void){
+	// Open/Close 센서가 모두 꺼져 있으면 Cap을 보유한 상태다.
+	xSL.Decapper.isGripCap = !xSL.CDecapping_Sensor.CT_Cap_Grip_Detect_Open
+			&& !xSL.CDecapping_Sensor.CT_Cap_Grip_Detect_Close;
+
+	// Forward에서만 Vial을 확인한다. 이동 중이나 Back에서는 마지막 판정을 유지한다.
+	if (!xSL.CDecapping_Sensor.Y_F_Limit_Sensor && xSL.CDecapping_Sensor.Y_B_Limit_Sensor){
+		xSL.Decapper.isGripBody = (xSL.CDecapping_Sensor.CT_Detect_Sensor == 1U);
+	}
+
 	//Z_limit Sensor가 둘다 꺼지는 경우 기기 문제
 	if((!xSL.CDecapping_Sensor.Z_H_Limit_Sensor) && (!xSL.CDecapping_Sensor.Z_L_Limit_Sensor)){
 		//센서 두개다 들어올수없음 ERROR
 		xSL.Decapper.Z_HL_isError = true;
 	}
-	//Z_limit Sensor가 둘다 꺼지는 경우 기기 문제
-	if((!xSL.CDecapping_Sensor.Y_H_Limit_Sensor) && (!xSL.CDecapping_Sensor.Y_L_Limit_Sensor)){
+	// Y Forward/Back 리미트가 동시에 도착을 표시하면 센서 이상이다.
+	if((!xSL.CDecapping_Sensor.Y_F_Limit_Sensor) && (!xSL.CDecapping_Sensor.Y_B_Limit_Sensor)){
 		//센서 두개다 들어올수없음 ERROR
-		xSL.Decapper.Y_HL_isError = true;
+		xSL.Decapper.Y_FB_isError = true;
 	}
 
 	//MASTER의 경우 CT_Body 잡는 센서가 둘다 불이 들어올 수 없음 Open/Close 둘중 1개가 들어오거나 뚜껑이 있는 경우 둘다 0
@@ -268,21 +266,27 @@ void CDecapping_CheckSensorValidity(void){
 	}
 }
 /* 하드웨어 출력 보조 함수 */
-/* CT Body 그리퍼 출력 */
-/**
- * @brief onoff를 Body 그리퍼 솔레노이드 출력에 직접 기록한다.
- * 센서 확인이나 완료 대기는 하지 않는 하위 출력 함수이다.
- */
-static void Air_CTBody_Gripper(unsigned char onoff){
-	IOEXP_WriteIObit(AIR_CT_BODY_GRIP_PIN, onoff);
+/** @brief 잡기/풀기 출력을 10/01로 설정한다. 대기 출력은 00이다. */
+static void Air_CT_SetGripOutput(U08 gripPin, U08 ungripPin, teCTGripOutput mode){
+	/* 방향을 바꿀 때는 반대쪽 출력을 먼저 끈다. */
+	if (mode == CT_GRIP_ENGAGE){
+		IOEXP_WriteIObit(ungripPin, OFF);
+		IOEXP_WriteIObit(gripPin, ON);
+	}
+	else{
+		IOEXP_WriteIObit(gripPin, OFF);
+		IOEXP_WriteIObit(ungripPin, mode == CT_GRIP_RELEASE ? ON : OFF);
+	}
 }
-/* CT Cap 그리퍼 출력 */
-/**
- * @brief onoff를 Cap 그리퍼 솔레노이드 출력에 직접 기록한다.
- * 센서 확인이나 완료 대기는 하지 않는 하위 출력 함수이다.
- */
-static void Air_CTCap_Gripper(unsigned char onoff){
-	IOEXP_WriteIObit(AIR_CT_CAP_GRIP_PIN, onoff);
+
+/** @brief Body 그리퍼 출력만 변경한다. 센서나 도착 상태는 확인하지 않는다. */
+static void Air_CTBody_Gripper(teCTGripOutput mode){
+	Air_CT_SetGripOutput(AIR_CT_BODY_GRIP_PIN, AIR_CT_BODY_UNGRIP_PIN, mode);
+}
+
+/** @brief Cap 그리퍼 출력만 변경한다. 센서나 도착 상태는 확인하지 않는다. */
+static void Air_CTCap_Gripper(teCTGripOutput mode){
+	Air_CT_SetGripOutput(AIR_CT_CAP_GRIP_PIN, AIR_CT_CAP_UNGRIP_PIN, mode);
 }
 
 /**
@@ -334,34 +338,34 @@ static S32 CDecap_ScaleVelocity(S32 velocity){
 
 	return scaled;
 }
-/* 공압 Y축을 High 방향으로 구동한다. */
+/* 공압 Y축을 Forward 방향으로 구동한다. */
 /**
- * @brief Y 공압을 High 방향으로 출력하고 재개에 사용할 방향을 저장한다.
- * H 출력 ON/L 출력 OFF이며 도착 센서 확인은 호출 시퀀스가 담당한다.
+ * @brief Y 공압을 Forward 방향으로 출력하고 재개에 사용할 방향을 저장한다.
+ * F 출력 ON/B 출력 OFF이며 도착 센서 확인은 호출 시퀀스가 담당한다.
  */
-static void Air_Y_High(void){
-	PauseContext.yDirection = PAUSE_Y_HIGH;
-	IOEXP_WriteIObit(Y_PIN_H_CONTROLLER, ON);
-	IOEXP_WriteIObit(Y_PIN_L_CONTROLLER, OFF);
+static void Air_Y_Forward(void){
+	PauseContext.yDirection = PAUSE_Y_FORWARD;
+	IOEXP_WriteIObit(Y_PIN_F_CONTROLLER, ON);
+	IOEXP_WriteIObit(Y_PIN_B_CONTROLLER, OFF);
 }
-/* 공압 Y축을 Low 방향으로 구동한다. */
+/* 공압 Y축을 Back 방향으로 구동한다. */
 /**
- * @brief Y 공압을 Low 방향으로 출력하고 재개에 사용할 방향을 저장한다.
- * H 출력 OFF/L 출력 ON이며 도착 센서 확인은 호출 시퀀스가 담당한다.
+ * @brief Y 공압을 Back 방향으로 출력하고 재개에 사용할 방향을 저장한다.
+ * F 출력 OFF/B 출력 ON이며 도착 센서 확인은 호출 시퀀스가 담당한다.
  */
-static void Air_Y_Low(void){
-	PauseContext.yDirection = PAUSE_Y_LOW;
-	IOEXP_WriteIObit(Y_PIN_H_CONTROLLER, OFF);
-	IOEXP_WriteIObit(Y_PIN_L_CONTROLLER, ON);
+static void Air_Y_Back(void){
+	PauseContext.yDirection = PAUSE_Y_BACK;
+	IOEXP_WriteIObit(Y_PIN_F_CONTROLLER, OFF);
+	IOEXP_WriteIObit(Y_PIN_B_CONTROLLER, ON);
 }
 /* Y축 출력만 정지한다. PAUSE 중에는 저장된 방향을 유지한다. */
 /**
- * @brief Y 공압의 H/L 출력을 모두 ON으로 만드는 프로젝트의 정지 출력을 적용한다.
+ * @brief Y 공압의 F/B 출력을 모두 OFF로 설정한다.
  * PAUSE에서 재개 방향을 보존해야 하므로 저장된 yDirection은 지우지 않는다.
  */
 static void Air_Y_StopOutput(void){
-	IOEXP_WriteIObit(Y_PIN_H_CONTROLLER, ON);
-	IOEXP_WriteIObit(Y_PIN_L_CONTROLLER, ON);
+	IOEXP_WriteIObit(Y_PIN_F_CONTROLLER, OFF);
+	IOEXP_WriteIObit(Y_PIN_B_CONTROLLER, OFF);
 }
 /* 공압 Y축을 정지하고 저장된 방향을 초기화한다. */
 /**
@@ -372,29 +376,29 @@ static void Air_Y_Stop(void){
 	Air_Y_StopOutput();
 	PauseContext.yDirection = PAUSE_Y_NONE;
 }
-/* 공압 Y축을 High 리미트까지 이동한다. */
+/* 공압 Y축을 Forward 리미트까지 이동한다. */
 /**
- * @brief 수동 Y High 이동을 호출 주기마다 한 단계씩 진행한다.
+ * @brief 수동 Y Forward 이동을 호출 주기마다 한 단계씩 진행한다.
  * 출력 후 High 센서가 0이 되면 정지하고 END_OK로 전환한다. READY_TIMEOUT_MS 초과는 오류 정지한다.
  */
-static void Air_Y_High_Move(void){
-	if (!IS_STARTED(SUB_yHMOVE)){
-		SET_STARTED(SUB_yHMOVE);
+static void Air_Y_Forward_Move(void){
+	if (!IS_STARTED(SUB_yFMOVE)){
+		SET_STARTED(SUB_yFMOVE);
 
 		CDecap_StartTimeout();
-		sSubPhase[SUB_yHMOVE] = MOVING;
+		sSubPhase[SUB_yFMOVE] = MOVING;
 	}
 
-	switch (sSubPhase[SUB_yHMOVE]){
+	switch (sSubPhase[SUB_yFMOVE]){
 		case MOVING:
-			Air_Y_High();
-			sSubPhase[SUB_yHMOVE] = MOVE_DONE;
+			Air_Y_Forward();
+			sSubPhase[SUB_yFMOVE] = MOVE_DONE;
 		break;
 		case MOVE_DONE:
-			if (!xSL.CDecapping_Sensor.Y_H_Limit_Sensor){
+			if (!xSL.CDecapping_Sensor.Y_F_Limit_Sensor){
 				Air_Y_Stop();
-				sSubPhase[SUB_yHMOVE] = MOVE_IDLE;
-				SET_DONE(SUB_yHMOVE);
+				sSubPhase[SUB_yFMOVE] = MOVE_IDLE;
+				SET_DONE(SUB_yFMOVE);
 			}
 			else if (CDecap_CheckTimeout(READY_TIMEOUT_MS)){
 				return;
@@ -404,33 +408,33 @@ static void Air_Y_High_Move(void){
 		break;
 	}
 
-	if (IS_DONE(SUB_yHMOVE)){
+	if (IS_DONE(SUB_yFMOVE)){
 		sPhase = DFSM_END_OK;
 	}
 }
-/* 공압 Y축을 Low 리미트까지 이동한다. */
+/* 공압 Y축을 Back 리미트까지 이동한다. */
 /**
- * @brief 수동 Y Low 이동을 호출 주기마다 한 단계씩 진행한다.
+ * @brief 수동 Y Back 이동을 호출 주기마다 한 단계씩 진행한다.
  * 출력 후 Low 센서가 0이 되면 정지하고 END_OK로 전환한다. READY_TIMEOUT_MS 초과는 오류 정지한다.
  */
-static void Air_Y_Low_Move(void){
-	if (!IS_STARTED(SUB_yLMOVE)){
-		SET_STARTED(SUB_yLMOVE);
+static void Air_Y_Back_Move(void){
+	if (!IS_STARTED(SUB_yBMOVE)){
+		SET_STARTED(SUB_yBMOVE);
 
 		CDecap_StartTimeout();
-		sSubPhase[SUB_yLMOVE] = MOVING;
+		sSubPhase[SUB_yBMOVE] = MOVING;
 	}
 
-	switch (sSubPhase[SUB_yLMOVE]){
+	switch (sSubPhase[SUB_yBMOVE]){
 		case MOVING:
-			Air_Y_Low();
-			sSubPhase[SUB_yLMOVE] = MOVE_DONE;
+			Air_Y_Back();
+			sSubPhase[SUB_yBMOVE] = MOVE_DONE;
 		break;
 		case MOVE_DONE:
-			if (!xSL.CDecapping_Sensor.Y_L_Limit_Sensor){
+			if (!xSL.CDecapping_Sensor.Y_B_Limit_Sensor){
 				Air_Y_Stop();
-				sSubPhase[SUB_yLMOVE] = MOVE_IDLE;
-				SET_DONE(SUB_yLMOVE);
+				sSubPhase[SUB_yBMOVE] = MOVE_IDLE;
+				SET_DONE(SUB_yBMOVE);
 			}
 			else if (CDecap_CheckTimeout(READY_TIMEOUT_MS)){
 				return;
@@ -440,7 +444,7 @@ static void Air_Y_Low_Move(void){
 		break;
 	}
 
-	if (IS_DONE(SUB_yLMOVE)){
+	if (IS_DONE(SUB_yBMOVE)){
 		sPhase = DFSM_END_OK;
 	}
 }
@@ -483,7 +487,7 @@ void CDecap_Error_Clear(void){
 	xSL.isError = false;
 	xSL.Decapper.CT_Body_Grip_isError = false;
 	xSL.Decapper.CT_Cap_Grip_isError = false;
-	xSL.Decapper.Y_HL_isError = false;
+	xSL.Decapper.Y_FB_isError = false;
 	xSL.Decapper.Z_HL_isError = false;
 }
 
@@ -637,6 +641,7 @@ static void CDecap_Stop(unsigned char ch){
  * xAT와 Busy를 해제하고 IDLE로 복귀한다. 그리퍼 출력과 기존 오류는 유지한다.
  */
 static void Decapper_StopAll(void){
+    if (sOperationResult == 1) sOperationResult = 3;
 	for (U08 ch = 0; ch < STEP_CH_MAX; ch++){
 		CDecap_Stop(ch);
 	}
@@ -676,9 +681,9 @@ static void CT_Body_Grip(void){
 		sPhase = DFSM_END_OK;
 	}
 }
-/* Z축을 홈 기준으로 설정한 뒤 공압 Y축을 High 리미트로 복귀한다. */
+/* Z축을 홈 기준으로 설정한 뒤 공압 Y축을 Forward 리미트로 복귀한다. */
 /**
- * @brief Z 고속 탐색 → 저속 후퇴 → 저속 재접근 → 좌표 0 설정 → Y High 복귀를 진행한다.
+ * @brief Z 고속 탐색 → 저속 후퇴 → 저속 재접근 → 좌표 0 설정 → Y Forward 복귀를 진행한다.
  * 각 호출은 현재 단계만 수행하며 센서 대기는 타임아웃으로 보호한다.
  * 이미 isHomed이면 종료한다. R축 원점 탐색은 이 함수에 포함되어 있지 않다.
  */
@@ -767,13 +772,13 @@ static void CDecap_Homing(void){
 	        Homing->Step = CDECAP_HOMING_Y_HOME;
 	        break;
 	    case CDECAP_HOMING_Y_HOME:
-	    	Air_Y_High();
+		Air_Y_Forward();
 	    	CDecap_StartTimeout();
 	        Homing->Step = CDECAP_HOMING_Y_WAIT;
 	        break;
 	    case CDECAP_HOMING_Y_WAIT:
 	    	if (CDecap_CheckTimeout(HOMING_TIMEOUT_MS)){return;}
-	    	if(!xSL.CDecapping_Sensor.Y_H_Limit_Sensor){
+		if(!xSL.CDecapping_Sensor.Y_F_Limit_Sensor){
 	    		Air_Y_Stop();
 	    		Homing->Step = CDECAP_HOMING_COMPLETE;
 	    	}
@@ -880,12 +885,12 @@ static void CDecap_Resume(void){
 		if (!CD_ABSMove(aR,PauseContext.rAcc,PauseContext.rVel,PauseContext.rTargetPos, xPL.Decapper.Limit_PosR)) return;
 	}
 
-	if(resumeY && savedYDirection == PAUSE_Y_HIGH){
-		Air_Y_High();
+	if(resumeY && savedYDirection == PAUSE_Y_FORWARD){
+		Air_Y_Forward();
 	}
 
-	if(resumeY && savedYDirection == PAUSE_Y_LOW){
-		Air_Y_Low();
+	if(resumeY && savedYDirection == PAUSE_Y_BACK){
+		Air_Y_Back();
 	}
 
 	sPhase = savedPhase;
@@ -916,7 +921,7 @@ static void CDecap_Origin(void){
             /* Z축 이동 완료 확인 */
             if(CDecap_IsMoveComplete(aZ)){
                 /* Y축을 H 방향으로 이동 */
-                Air_Y_High();
+                Air_Y_Forward();
                 CDecap_StartTimeout();
                 Origin_Step = Recovery_Y;
             }
@@ -925,8 +930,8 @@ static void CDecap_Origin(void){
         case Recovery_Y:
             if(CDecap_CheckTimeout(HOMING_TIMEOUT_MS)){ return; }
 
-            /* Y_H 센서는 Active Low: 0이면 H 위치 도착 */
-            if(!xSL.CDecapping_Sensor.Y_H_Limit_Sensor){
+            /* Y_F 센서는 Active Low: 0이면 Forward 위치 도착 */
+            if(!xSL.CDecapping_Sensor.Y_F_Limit_Sensor){
                 Air_Y_Stop();
                 Origin_Step = Recovery_COMPLETE;
             }
@@ -959,7 +964,6 @@ static void CDecap_Capping(void){
 			if(xSL.CDecapping_Sensor.CT_Detect_Sensor && xSL.isHomed){
 				xprintf("There is CT \n");
 				CDecapping_Step = CDecapping_Body_Grip;
-
 			}
 			else{
 				xprintf("There is no CT.\n");
@@ -967,7 +971,7 @@ static void CDecap_Capping(void){
 			}
 			break;
 		case CDecapping_Body_Grip:	//CT이동을 위한 CT Body 잡기
-			Air_CTBody_Gripper(ON);
+			Air_CTBody_Gripper(CT_GRIP_ENGAGE);
 			previousTime[SUB_BODY_GRIP_WAIT] = gTriggerCount;
 			CDecapping_Step = CDecapping_Move_Pos;
 			break;
@@ -975,13 +979,13 @@ static void CDecap_Capping(void){
 			if ((gTriggerCount - previousTime[SUB_BODY_GRIP_WAIT]) < Wait_1s){
 				break;
 			}
-			Air_Y_Low();
+			Air_Y_Back();
 			CDecap_StartTimeout();
 			CDecapping_Step = CDecapping_Capping_Ready;
 			break;
 		case CDecapping_Capping_Ready: //y축이 특정위치로 도착했다는 명령어를 받으면 z축은 뚜껑위까지 이동
 			if (CDecap_CheckTimeout(CAPPING_TIMEOUT_MS)){return;}
-			if (!xSL.CDecapping_Sensor.Y_L_Limit_Sensor){
+			if (!xSL.CDecapping_Sensor.Y_B_Limit_Sensor){
 				Air_Y_Stop();
 				if (!CD_ABSMove(aZ,xPL.Decapper.ZDecapAcc,xPL.Decapper.ZDecapVel,xPL.Decapper.ZCap_UpPos, xPL.Decapper.Limit_PosZ)) return;
 				CDecap_StartTimeout();
@@ -1000,7 +1004,7 @@ static void CDecap_Capping(void){
 		case CDecapping_Move_PrevR://Capping 행동이 끝나면 Cap Grip 풀기
 			if (CDecap_CheckTimeout(CAPPING_TIMEOUT_MS)){return;}
 			if(CDecap_IsMoveComplete(aZ) && CDecap_IsMoveComplete(aR)){
-				Air_CTCap_Gripper(OFF);
+				Air_CTCap_Gripper(CT_GRIP_RELEASE);
 				CDecapping_Step = CDecapping_Move_PrevZ;
 			}
 			break;
@@ -1012,16 +1016,16 @@ static void CDecap_Capping(void){
 		case CDecapping_Move_PrevY://Z축 이동이 완료된 이후 Y축은 다시 앞으로 이동 --> Slave에게 명령
 			if (CDecap_CheckTimeout(CAPPING_TIMEOUT_MS)){return;}
 			if(CDecap_IsMoveComplete(aZ)){
-				Air_Y_High();
+				Air_Y_Forward();
 				CDecap_StartTimeout();
 				CDecapping_Step = CDecapping_Complete_Wait;
 			}
 			break;
 		case CDecapping_Complete_Wait://Y축이 다 이동되었다고 명령어 받기 --> 이후 CT Body Grip 풀기
 			if (CDecap_CheckTimeout(CAPPING_TIMEOUT_MS)){return;}
-			if (!xSL.CDecapping_Sensor.Y_H_Limit_Sensor){
+			if (!xSL.CDecapping_Sensor.Y_F_Limit_Sensor){
 				Air_Y_Stop();
-				Air_CTBody_Gripper(OFF);
+				Air_CTBody_Gripper(CT_GRIP_RELEASE);
 				CDecapping_Step = CDecapping_Done;
 			}
 			break;
@@ -1051,7 +1055,7 @@ static void CDecap_Decapping(void){
 			}
 			break;
 		case CDecapping_Body_Grip: //CT이동을 위한 CT Body 잡기
-			Air_CTBody_Gripper(ON);
+			Air_CTBody_Gripper(CT_GRIP_ENGAGE);
 			previousTime[SUB_BODY_GRIP_WAIT] = gTriggerCount;
 			CDecapping_Step = CDecapping_Move_Pos;
 			break;
@@ -1059,13 +1063,13 @@ static void CDecap_Decapping(void){
 			if ((gTriggerCount - previousTime[SUB_BODY_GRIP_WAIT]) < Wait_1s){
 				break;
 			}
-			Air_Y_Low();
+			Air_Y_Back();
 			CDecap_StartTimeout();
 			CDecapping_Step = CDecapping_Decapping_Ready;
 			break;
 		case CDecapping_Decapping_Ready: //Cap을 잡기 위해 CAP Side 위치 까지 이동
 			if (CDecap_CheckTimeout(DECAPPING_TIMEOUT_MS)){return;}
-			if (!xSL.CDecapping_Sensor.Y_L_Limit_Sensor){
+			if (!xSL.CDecapping_Sensor.Y_B_Limit_Sensor){
 				Air_Y_Stop();
 				if (!CD_ABSMove(aZ,xPL.Decapper.ZDecapAcc,xPL.Decapper.ZDecapVel,xPL.Decapper.ZCap_SidePos, xPL.Decapper.Limit_PosZ)) return;
 				CDecap_StartTimeout();
@@ -1075,7 +1079,7 @@ static void CDecap_Decapping(void){
 		case CDecapping_Cap_Capgrip: //Cap Grip
 			if (CDecap_CheckTimeout(DECAPPING_TIMEOUT_MS)){return;}
 			if(CDecap_IsMoveComplete(aZ)){
-				Air_CTCap_Gripper(ON);
+				Air_CTCap_Gripper(CT_GRIP_ENGAGE);
 				previousTime[SUB_CAPPING] = gTriggerCount;
 				CDecapping_Step = CDecapping_sData_Decapping;
 			}
@@ -1102,16 +1106,16 @@ static void CDecap_Decapping(void){
 		case CDecapping_Move_PrevY: //축이 원위치 되고 모터가 멈췄다면 Y축 원위치 --> Slave 명령
 			if (CDecap_CheckTimeout(DECAPPING_TIMEOUT_MS)){return;}
 			if(CDecap_IsMoveComplete(aZ)){
-				Air_Y_High();
+				Air_Y_Forward();
 				CDecap_StartTimeout();
 				CDecapping_Step = CDecapping_Complete_Wait;
 			}
 			break;
 		case CDecapping_Complete_Wait: //y축 원위치 되었는지 명령 대기 --> 원위치 되었다면 CT Body Grip 풀기
 			if (CDecap_CheckTimeout(DECAPPING_TIMEOUT_MS)){return;}
-			if (!xSL.CDecapping_Sensor.Y_H_Limit_Sensor){
+			if (!xSL.CDecapping_Sensor.Y_F_Limit_Sensor){
 				Air_Y_Stop();
-				Air_CTBody_Gripper(OFF);
+				Air_CTBody_Gripper(CT_GRIP_RELEASE);
 				CDecapping_Step = CDecapping_Done;
 			}
 			break;
@@ -1149,7 +1153,7 @@ static void UCDecap_Capping(void){
 			case CDecapping_Move_PrevR://Capping 행동이 끝나면 Cap Grip 풀기
 				if (CDecap_CheckTimeout(CAPPING_TIMEOUT_MS)){return;}
 				if(CDecap_IsMoveComplete(aZ) && CDecap_IsMoveComplete(aR)){
-					Air_CTCap_Gripper(OFF);
+					Air_CTCap_Gripper(CT_GRIP_RELEASE);
 					CDecapping_Step = CDecapping_Move_PrevZ;
 				}
 				break;
@@ -1191,7 +1195,7 @@ static void UCDecap_Decapping(void){
 			case CDecapping_Cap_Capgrip: //Cap Grip
 				if (CDecap_CheckTimeout(DECAPPING_TIMEOUT_MS)){return;}
 				if(CDecap_IsMoveComplete(aZ)){
-					Air_CTCap_Gripper(ON);
+					Air_CTCap_Gripper(CT_GRIP_ENGAGE);
 					previousTime[SUB_CAPPING] = gTriggerCount;
 					CDecapping_Step = CDecapping_sData_Decapping;
 				}
@@ -1244,6 +1248,9 @@ static void UCDecap_CDecap_Longrun(void){
 			UCDecap_Capping();
 			if (sPhase == DFSM_END_OK){
 				xCD.Decapper.LongRunCount++;
+				if (sLongRunLimit && xCD.Decapper.LongRunCount >= sLongRunLimit) {
+					return; /* retain END_OK to finish the complete cycle */
+				}
 				sPhase = DFSM_LONGRUN;
 				xCD.Decapper.phaseDecapCap = LONGRUN_DECAP;
 			}
@@ -1266,6 +1273,24 @@ S32 CDecap_GetZPosition(void){
 	return xCD.Decapper.Motor_CurPos;
 }
 
+bool CDecap_IsValidTarget(U08 axis, S32 position) {
+    S32 lower, upper;
+    return CDecap_GetLimits(axis, &lower, &upper) && position >= lower && position <= upper;
+}
+int CDecap_GetPhase(void) { return (int)sPhase; }
+U32 CDecap_GetOperationId(void) { return sOperationId; }
+int CDecap_GetOperationResult(void) { return sOperationResult; }
+bool CDecap_IsPaused(void) { return PauseContext.isPaused; }
+U32 CDecap_GetLongRunLimit(void) { return sLongRunLimit; }
+bool CDecap_TryLongRun(U32 limit) {
+    bool accepted;
+    taskENTER_CRITICAL();
+    accepted = CDecap_TryRequestAction(ACTION_LONGRUN);
+    if (accepted) sLongRunLimit = limit;
+    taskEXIT_CRITICAL();
+    return accepted;
+}
+
 /* ACTION → Phase 매핑 테이블 */
 static const teFSM_Decapper ActionToPhase[ACTION_MAX] = {
 		[ACTION_NONE] /*     	*/ = DFSM_IDLE,
@@ -1286,8 +1311,8 @@ static const teFSM_Decapper ActionToPhase[ACTION_MAX] = {
 		[ACTION_RROTATE] /*   	*/ = DFSM_RROTATE,
 		[ACTION_AROTATE] /*   	*/ = DFSM_AROTATE,
 
-		[ACTION_Y_H_MOVE] /*   	*/ = DFSM_Y_H_MOVE,
-		[ACTION_Y_L_MOVE] /*   	*/ = DFSM_Y_L_MOVE,
+		[ACTION_Y_F_MOVE] /*   	*/ = DFSM_Y_F_MOVE,
+		[ACTION_Y_B_MOVE] /*   	*/ = DFSM_Y_B_MOVE,
 
 
 		[ACTION_UDECAP] /*   	*/ = DFSM_UDECAP,
@@ -1320,8 +1345,8 @@ static FSM_Handler FSM_Table[DFSM_PHASE_MAX] = {
 		[DFSM_RMOVEZ] /*    	*/ = CDecap_Relmove_Z,
 		[DFSM_AMOVEZ] /*    	*/ = CDecap_Absmove_Z,
 
-		[DFSM_Y_H_MOVE] /*    	*/ = Air_Y_High_Move,
-		[DFSM_Y_L_MOVE] /*    	*/ = Air_Y_Low_Move,
+		[DFSM_Y_F_MOVE] /*    	*/ = Air_Y_Forward_Move,
+		[DFSM_Y_B_MOVE] /*    	*/ = Air_Y_Back_Move,
 
 		[DFSM_UDECAP] /*    	*/ = UCDecap_Decapping,
 		[DFSM_UCAP] /*    		*/ = UCDecap_Capping,
@@ -1397,7 +1422,7 @@ void CDecap_Action_Statemachine(teXActionType actionType) {
 	}
 
 //	/* 래치된 센서 오류가 있으면 비정상 처리 상태로 전환한다. */
-//	if(xSL.Decapper.Z_HL_isError || xSL.Decapper.Y_HL_isError
+//	if(xSL.Decapper.Z_HL_isError || xSL.Decapper.Y_FB_isError
 //		|| xSL.Decapper.CT_Cap_Grip_isError || xSL.Decapper.CT_Body_Grip_isError){
 //		xSL.isBusy = NO;
 //		sPhase = DFSM_ABNORMAL;
@@ -1418,6 +1443,7 @@ void CDecap_Action_Statemachine(teXActionType actionType) {
  * sResumePhase가 지정된 경우에는 그 단계로 복귀하며 일반 종료 정리를 건너뛴다.
  */
 static void FSM_End_ok(void) {
+    sOperationResult = 2;
 	/* Resume 래치: 시퀀스 중간에 HOME 등이 끝난 후 원래 Phase로 복귀 */
 	if (sResumePhase != DFSM_IDLE) {
 		sPhase = sResumePhase;
@@ -1442,7 +1468,7 @@ static void FSM_Abnormal(void){
     ERR_MSG_SEND("H_L Limit Sensor	%d",xSL.Decapper.Z_HL_isError);
     ERR_MSG_SEND("CT_Body Sensor 	%d",xSL.Decapper.CT_Body_Grip_isError);
     ERR_MSG_SEND("CT_Cap Sensor 	%d",xSL.Decapper.CT_Cap_Grip_isError);
-    ERR_MSG_SEND("Y Limit Sensor 	%d",xSL.Decapper.Y_HL_isError);
+    ERR_MSG_SEND("Y Limit Sensor 	%d",xSL.Decapper.Y_FB_isError);
 
     CDecap_Fault(ERROR_CODE_DECAP_STATE);
 }
@@ -1536,7 +1562,11 @@ bool CDecap_TryRequestAction(teXActionType action){
     bool allowed;
     taskENTER_CRITICAL();
     allowed = CDecap_IsIdle() && !xSL.isError && sFaultCode == ERROR_CODE_NONE;
-    if (allowed) xAT = action;
+    if (allowed) {
+        xAT = action;
+        ++sOperationId;
+        sOperationResult = 1;
+    }
     taskEXIT_CRITICAL();
     return allowed;
 }
@@ -1558,6 +1588,7 @@ void CDecap_ReportError(void){
  * 후속 오류로 최초 원인을 덮지 않으며 ReportError로 외부 조회 값도 맞춘다.
  */
 static void CDecap_Fault(teErrorCode code){
+    sOperationResult = 4;
     if (sFaultCode == ERROR_CODE_NONE) sFaultCode = code;
     xSL.isError = YES;
     xSL.errorCode = sFaultCode;

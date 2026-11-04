@@ -113,21 +113,23 @@
 /*Sensor Parameter*/
 #define Z_H_SENSOR_PIN                 (0U)
 #define Z_L_SENSOR_PIN                 (1U)
-#define Y_H_SENSOR_PIN                 (2U)
-#define Y_L_SENSOR_PIN                 (3U)
-#define CT_BODY_GRIP_OPEN_SENSOR_PIN   (4U)
-#define CT_BODY_GRIP_CLOSE_SENSOR_PIN  (5U)
-#define CT_CAP_GRIP_OPEN_SENSOR_PIN    (6U)
-#define CT_CAP_GRIP_CLOSE_SENSOR_PIN   (7U)
+#define Y_F_SENSOR_PIN                 (2U)
+#define Y_B_SENSOR_PIN                 (3U)
+#define CT_CAP_GRIP_OPEN_SENSOR_PIN    (4U)
+#define CT_CAP_GRIP_CLOSE_SENSOR_PIN   (5U)
+#define CT_BODY_GRIP_OPEN_SENSOR_PIN   (6U)
+#define CT_BODY_GRIP_CLOSE_SENSOR_PIN  (7U)
 #define CT_DETECT_OPEN_SENSOR_PIN      (8U)
 
 /*Y축 공압기*/
-#define Y_PIN_H_CONTROLLER		(3)
-#define Y_PIN_L_CONTROLLER		(4)
+#define Y_PIN_F_CONTROLLER		(0)
+#define Y_PIN_B_CONTROLLER		(1)
 
-/*CT*/
-#define AIR_CT_BODY_GRIP_PIN	(0)
-#define AIR_CT_CAP_GRIP_PIN		(1)
+/* CT 공압 그리퍼 출력 (DO 채널 번호 = 비트 번호 + 1) */
+#define AIR_CT_CAP_GRIP_PIN      (2)
+#define AIR_CT_CAP_UNGRIP_PIN    (3)
+#define AIR_CT_BODY_GRIP_PIN     (4)
+#define AIR_CT_BODY_UNGRIP_PIN   (5)
 
 typedef void (*FSM_Handler)(void);
 
@@ -152,8 +154,8 @@ typedef enum{
 	ACTION_RROTATE,
 	ACTION_AROTATE,
 
-	ACTION_Y_H_MOVE,
-	ACTION_Y_L_MOVE,
+	ACTION_Y_F_MOVE,
+	ACTION_Y_B_MOVE,
 
 	ACTION_UDECAP,
 	ACTION_UCAP,
@@ -187,8 +189,8 @@ typedef enum{
     DFSM_RMOVEZ,
     DFSM_AMOVEZ,
 
-	DFSM_Y_H_MOVE,
-	DFSM_Y_L_MOVE,
+	DFSM_Y_F_MOVE,
+	DFSM_Y_B_MOVE,
 
 	DFSM_UDECAP,
 	DFSM_UCAP,
@@ -301,11 +303,11 @@ typedef struct{
 
 typedef struct{
 
-	bool Cap_is;
-    bool Body_is;
+    bool isGripCap;  // Cap Open/Close 입력이 모두 0이면 보유
+    bool isGripBody; // Forward에서 마지막으로 확인한 Vial 유무
 
     unsigned char Z_HL_isError;
-    unsigned char Y_HL_isError;
+    unsigned char Y_FB_isError;
     unsigned char CT_Cap_Grip_isError;
     unsigned char CT_Body_Grip_isError;
 
@@ -319,7 +321,6 @@ typedef struct{
 
 	void (*Senser_Update)(void);
     void (*Status_Update)(void);
-    void (*CT_Cap_Body_Update)(void);
 
     void (*CheckSensorValidity)(void);
 
@@ -332,8 +333,8 @@ typedef enum{
 	SUB_rRMOVE,
 	SUB_zAMOVE,
 	SUB_rAMOVE,
-	SUB_yHMOVE,
-	SUB_yLMOVE,
+	SUB_yFMOVE,
+	SUB_yBMOVE,
 	SUB_HOMEZ,
 	SUB_HOMEY,
 	SUB_sMOVE,
@@ -382,8 +383,8 @@ typedef enum{
 typedef struct{
 	unsigned char Z_H_Limit_Sensor;
 	unsigned char Z_L_Limit_Sensor;
-	unsigned char Y_H_Limit_Sensor;
-	unsigned char Y_L_Limit_Sensor;
+	unsigned char Y_F_Limit_Sensor;
+	unsigned char Y_B_Limit_Sensor;
 	unsigned char CT_Body_Grip_Detect_Open;
 	unsigned char CT_Body_Grip_Detect_Close;
 	unsigned char CT_Cap_Grip_Detect_Open;
@@ -393,7 +394,7 @@ typedef struct{
 
 typedef enum{
 	Ready_Idle= 0,
-	Ready_Y_L,
+	Ready_Y_B,
 	Ready_Done,
 }Ready_Statemachin_state;
 
@@ -408,8 +409,8 @@ typedef struct{
 
 typedef enum{
     PAUSE_Y_NONE = 0,
-    PAUSE_Y_HIGH,
-    PAUSE_Y_LOW
+    PAUSE_Y_FORWARD,
+    PAUSE_Y_BACK
 } Pause_Y_Direction_t;
 
 typedef struct{
@@ -499,14 +500,9 @@ void CDecap_M_S_Detect(void);
  * 이름의 Y와 달리 실제 대상은 aZ와 aR이다. 공압 Y축 완료는 리미트 센서로 판단한다.
  */
 void YZ_Motor_Status_Update(void);
-/**
- * @brief 그리퍼의 Open/Close 입력이 모두 0이면 물체를 잡은 상태로 해석한다.
- * 이 판정으로 xSL.Decapper의 Body_is와 Cap_is를 갱신한다. 별도 CT 감지 입력 판정과는 구분한다.
- */
-void Cap_CAP_Body_Detect_Sensor(void);
 //Diagnose==================================================
 /**
- * @brief 센서 조합의 이상을 xSL.Decapper 오류 플래그에 누적한다.
+ * @brief Cap/Vial 보유 상태를 갱신하고 센서 조합 이상을 오류 플래그에 누적한다.
  * Z/Y 리미트가 모두 0이거나 그리퍼 Open/Close가 모두 1이면 해당 오류를 설정한다.
  * 정상 입력으로 돌아와도 자동 해제하지 않는다. 이 센서 오류를 정지에 연결하는 FSM 인터록은 현재 주석 처리되어 있다.
  */
@@ -542,4 +538,11 @@ void CDecap_SetSpeedPercent(U08 percent);
  * @brief 현재 xCD에 저장된 전체 속도 비율(%)을 반환한다.
  */
 U08 CDecap_GetSpeedPercent(void);
+bool CDecap_IsValidTarget(U08 axis, S32 position);
+int CDecap_GetPhase(void);
+bool CDecap_IsPaused(void);
+U32 CDecap_GetLongRunLimit(void);
+bool CDecap_TryLongRun(U32 limit);
+U32 CDecap_GetOperationId(void);
+int CDecap_GetOperationResult(void);
 #endif /* APP_HW_DEVICE_CDCAP_H_ */

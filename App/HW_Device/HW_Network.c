@@ -198,6 +198,7 @@ static void tcp_listen_retry(uint8_t sock, uint16_t port)
 
 static void tcp_close_safe(uint8_t sock)
 {
+    Network_ResetReceive(sock);
     uint8_t st = getSn_SR(sock);
 
     LOG_MSG_SEND("[TCP] safe close socket %d (state=%d)", sock, st);
@@ -330,7 +331,7 @@ static void TcpServer_DualSocket_FSM(tcp_ctrl_t *tcp, U8 *pMsg, U16 port)
 
             if (size > 0)
             {
-                msgLen = recv(as, pMsg, size);
+                msgLen = recv(as, pMsg, size > sizeof(TcpMsgBuf) ? sizeof(TcpMsgBuf) : size);
 
                 if (tcp->role == TCP_ROLE_ENGINEER)
                 {
@@ -338,7 +339,7 @@ static void TcpServer_DualSocket_FSM(tcp_ctrl_t *tcp, U8 *pMsg, U16 port)
                 }
                 else
                 {
-                    Network_MsgProcess(0, msgLen, (char *)pMsg); // 기존 프로토콜
+                    Network_MsgProcess(as, msgLen, (char *)pMsg); // 기존 프로토콜
                 }
 
                 if (msgLen <= 0)
@@ -420,7 +421,7 @@ void Network_TcpServer(SOCKET sn, U8 *pMsg, U16 port)
             // LED_Toggle_h((ELedNum)XHW_STATUS_LED_1, 4); // 통신 상태 점검용
 
             msgLen = recv(sn, pMsg, size);
-            Network_MsgProcess(0, msgLen, (char *)pMsg); // 수신처리
+            Network_MsgProcess(as, msgLen, (char *)pMsg); // 수신처리
         }
 
         /** @brief Send Process */
@@ -494,7 +495,7 @@ static void Network_TcpServerEng(SOCKET sn, U8 *pMsg, U16 port)
             // LED_Toggle_h((ELedNum)XHW_STATUS_LED_1, 4); // 통신 상태 점검용
 
             msgLen = recv(sn, pMsg, size);
-            Network_MsgProcess(0, msgLen, (char *)pMsg); // 수신처리
+            Network_MsgProcess(as, msgLen, (char *)pMsg); // 수신처리
         }
 
         /** @brief Send Process */
@@ -574,7 +575,7 @@ void Network_TcpServer(SOCKET sn, U8 *pMsg, U16 port)
             // Socket_Send(Sock, pMsg, msgLen);               // test code: echo
             // xcprintf("RcvMsg Len = %d, %s", msgLen, pMsg); // test code: loopback
 
-            Network_MsgProcess(0, msgLen, (char *)pMsg); // 수신처리
+            Network_MsgProcess(as, msgLen, (char *)pMsg); // 수신처리
         }
 
         /** @brief Send Process */
