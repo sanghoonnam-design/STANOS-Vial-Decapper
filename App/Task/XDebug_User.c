@@ -205,7 +205,7 @@ __attribute__((unused)) void CLI_HandleCtrl_PressedKeys(char c)
         {
             gWait_SaveConfirm = true;
             gSaveConfirmTick = xTaskGetTickCount();
-            xcprintf_t("Save to EEPROM? (Y/N): ");
+            xcprintf_t("Save all RAM parameters to EEPROM? (Y/N): ");
         }
         break;
     case 'L':

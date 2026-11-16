@@ -20,6 +20,15 @@ static int reached[2][32];
 void model_io(U8 ch,U8 value){
  if(ch==AIR_CT_CAP_GRIP_PIN && io[ch]!=value && (axes[0].active||axes[1].active)) prematureGrip++;
  io[ch]=value;
+ /* 기본 모형은 출력 후 도착한다. 지연/미도착은 test_gripper_waits.py에서 검사한다. */
+ if(ch==AIR_CT_CAP_GRIP_PIN || ch==AIR_CT_CAP_UNGRIP_PIN){
+  xSL.CDecapping_Sensor.CT_Cap_Grip_Detect_Open=!io[AIR_CT_CAP_GRIP_PIN] && io[AIR_CT_CAP_UNGRIP_PIN];
+  xSL.CDecapping_Sensor.CT_Cap_Grip_Detect_Close=0;
+ }
+ if(ch==AIR_CT_BODY_GRIP_PIN || ch==AIR_CT_BODY_UNGRIP_PIN){
+  xSL.CDecapping_Sensor.CT_Body_Grip_Detect_Open=!io[AIR_CT_BODY_GRIP_PIN] && io[AIR_CT_BODY_UNGRIP_PIN];
+  xSL.CDecapping_Sensor.CT_Body_Grip_Detect_Close=0;
+ }
 }
 void model_abs(sMotionCommand_t*p){
  Axis *a=&axes[p->Axis];
@@ -51,7 +60,7 @@ static void setup(void){
  xPL.Decapper.ZDecapAcc=300000;xPL.Decapper.ZDecapVel=20000;
  xPL.Decapper.RDecapAcc=300000;xPL.Decapper.RDecapVel=20000;
  xPL.Decapper.ZCap_SidePos=4000;xPL.Decapper.ZCap_UpPos=2000;
- xPL.Decapper.ZCap_Origin_Position=0;xPL.Decapper.RDecapPos=1000;
+ xPL.Decapper.ZCap_Origin_Position=0;xPL.Decapper.RDecapPos=-1000;
  xSL.isHomed=true;xSL.CDecapping_Sensor.CT_Detect_Sensor=1;
 }
 static void start(void){tsXParsedData cmd={0};CMD_Handle_LongRun(&cmd,0);}
@@ -63,9 +72,9 @@ static void finish_unit(void){for(int n=0;n<3000 && !xSL.isError;n++){tick();if(
 int main(void){
  setbuf(stdout,NULL);
  setup();position[1]=2500;start();run(1000,1000000);
- CHECK("1000 cycles return R to nonzero starting coordinate",xCD.Decapper.LongRunCount==1000 && !xSL.isError && position[1]==2500);
- bool equal=true;for(int i=0;i<rMoves;i++)if(rDistance[i]!=(i%2?1000:-1000))equal=false;
- CHECK("every DECAP/CAP rotates the configured amount",equal && rMoves==8);
+ CHECK("1000 cycles return R to HOME zero from a nonzero start",xCD.Decapper.LongRunCount==1000 && !xSL.isError && position[1]==0);
+ bool equal=true;for(int i=0;i<rMoves;i++)if(rDistance[i]!=(i==0?-3500:(i%2?1000:-1000)))equal=false;
+ CHECK("DECAP/CAP use fixed absolute endpoints without accumulating",equal && rMoves==8);
  setup();mode=2;start();run(3,3000);
  CHECK("stopped feedback without arrival times out before grip/count",xCD.Decapper.LongRunCount==0 && errorCode==ERROR_CODE_DECAP_TIMEOUT && io[AIR_CT_CAP_GRIP_PIN]==0 && !overwritten);
  setup();startDelay=3;start();run(10,10000);
@@ -75,21 +84,35 @@ int main(void){
  setup();xPL.Decapper.ZCap_SidePos=xPL.Decapper.ZCap_UpPos=0;xPL.Decapper.RDecapPos=0;start();run(5,3000);
  CHECK("already at target completes without observing motor ON",xCD.Decapper.LongRunCount==5 && !xSL.isError);
  setup();position[1]=4000;begin_unit(ACTION_UCAP);finish_unit();begin_unit(ACTION_UCAP);finish_unit();
- CHECK("standalone CAP adds same amount on every request",position[1]==6000 && !xSL.isError);
+ CHECK("repeated standalone CAP stays at zero",position[1]==0 && !xSL.isError);
  begin_unit(ACTION_UDECAP);finish_unit();begin_unit(ACTION_UDECAP);finish_unit();
- CHECK("standalone DECAP subtracts same amount on every request",position[1]==4000 && !xSL.isError);
- setup();position[1]=99500;begin_unit(ACTION_UCAP);finish_unit();
- CHECK("relative R endpoint beyond limit faults",errorCode==ERROR_CODE_DECAP_LIMIT && rMoves==0);
+ CHECK("repeated standalone DECAP stays at taught target",position[1]==-1000 && !xSL.isError);
+ setup();xPL.Decapper.RDecapPos=100001;begin_unit(ACTION_UDECAP);finish_unit();
+ CHECK("absolute R endpoint beyond limit faults",errorCode==ERROR_CODE_DECAP_LIMIT && rMoves==0);
  setup();xPL.Decapper.RDecapPos=INT32_MIN;begin_unit(ACTION_UDECAP);finish_unit();
- CHECK("R delta arithmetic cannot overflow into valid goal",errorCode==ERROR_CODE_DECAP_LIMIT && rMoves==0);
+ CHECK("invalid signed R target cannot enter a valid goal",errorCode==ERROR_CODE_DECAP_LIMIT && rMoves==0);
  setup();mode=2;xCD.Decapper.Motor_TargetPos[0]=500;begin_unit(ACTION_AMOVEZ);finish_unit();
  CHECK("manual absolute move needs arrival and times out",errorCode==ERROR_CODE_DECAP_TIMEOUT);
  setup();mode=2;xCD.Decapper.Motor_TargetPos[0]=500;begin_unit(ACTION_RMOVEZ);finish_unit();
  CHECK("manual relative move needs arrival and times out",errorCode==ERROR_CODE_DECAP_TIMEOUT);
  setup();startDelay=3;position[1]=4000;begin_unit(ACTION_DECAP);finish_unit();
- CHECK("automatic DECAP uses same arrival checks and fixed R amount",!xSL.isError && position[1]==3000 && !overwritten && !prematureGrip);
+ CHECK("automatic DECAP reaches taught absolute endpoint",!xSL.isError && position[1]==-1000 && !overwritten && !prematureGrip);
  begin_unit(ACTION_CAP);finish_unit();
- CHECK("automatic CAP restores original R with fixed amount",!xSL.isError && position[1]==4000 && !overwritten && !prematureGrip);
+ CHECK("automatic CAP returns to HOME zero",!xSL.isError && position[1]==0 && !overwritten && !prematureGrip);
+ for(int automatic=0;automatic<2;automatic++){
+  setup();position[aR]=-1000;xPL.Decapper.ZCap_SidePos=160001;
+  begin_unit(automatic?ACTION_CAP:ACTION_UCAP);finish_unit();
+  CHECK("invalid CAP Z endpoint is rejected before the paired R command",
+        errorCode==ERROR_CODE_DECAP_LIMIT && rMoves==0 && position[aR]==-1000);
+  setup();position[aR]=0;xPL.Decapper.ZCap_UpPos=160001;
+  begin_unit(automatic?ACTION_DECAP:ACTION_UDECAP);finish_unit();
+  CHECK("invalid DECAP Z endpoint is rejected before the paired R command",
+        errorCode==ERROR_CODE_DECAP_LIMIT && rMoves==0 && position[aR]==0);
+ }
+ setup();position[aR]=0;xPL.Decapper.RDecapPos=100001;
+ begin_unit(ACTION_UDECAP);finish_unit();
+ CHECK("invalid R endpoint also blocks the paired Z move",
+       errorCode==ERROR_CODE_DECAP_LIMIT && rMoves==0 && moveCount==1);
  setup();startDelay=3;xCD.Decapper.Motor_TargetPos[0]=500;begin_unit(ACTION_AMOVEZ);finish_unit();
  CHECK("manual absolute valid move completes",!xSL.isError && position[0]==500 && sPhase==DFSM_IDLE);
  xCD.Decapper.Motor_TargetPos[0]=-200;begin_unit(ACTION_RMOVEZ);finish_unit();

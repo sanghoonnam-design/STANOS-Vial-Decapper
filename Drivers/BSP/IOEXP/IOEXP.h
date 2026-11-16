@@ -79,9 +79,17 @@ IOEXP_EXT U8   IOEXP_ReadIObit(U8 inout, U8 bit);
 
 IOEXP_EXT void IOEXP_WriteIOclear(void);
 
+/** @note digitalRead 속도 개선 버전 (Cached) : by KPS
+ *  - IOEXP_UpdateCache() 를 주기적으로 호출해야 한다. (현재: TASK_UpdateSIGData 10ms)
+ *  - IOEXP_ReadIObit_Cached() 는 SPI 통신 없이 캐시에서 값을 돌려준다.
+ *  - IOEXP_ReadIObit() 는 기존대로 호출 시점에 SPI 로 직접 읽는다.
+ */
+IOEXP_EXT void IOEXP_UpdateCache(void);
+IOEXP_EXT U8   IOEXP_ReadIObit_Cached(U8 inout, U8 bit);
+
 IOEXP_EXT void (*IOEXP_IntCallBack)(U8 ch);
 
-IOEXP_EXT U8 (*digitalRead)(U8 inout, U8 ch);  // ch: 0~5, by KPS
+IOEXP_EXT U8 (*digitalRead)(U8 inout, U8 ch);  
 IOEXP_EXT void (*digitalWrite)(U8 ch, U8 OnOff);
 IOEXP_EXT void (*digitalClear)(void);
 

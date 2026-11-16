@@ -118,6 +118,8 @@ void SYSPL_UpdateFromEeprom_Flash(tsEEPROM_Config *config); // EEPROM or Flash �
 bool EEPROMPL_LoadFromEEPROM(tsEEPROM_Config *config);      // EEPROM에서만 파라미터 데이터를 로드합니다.
 /**/ bool EEPROMPL_RestoreFromEEPROMBackup(U08 blockIndex); // 원본 EEPROM 손상시 백업 EEPROM 에서 복구
 bool EEPROMPL_SaveVerified(void);
+/** @brief EEPROM에 저장된 설정에서 지정 축의 티칭 좌표만 변경한다. */
+bool EEPROMPL_SaveDecapperTarget(U08 axis, S32 position);
 void EEPROMPL_SaveToEEPROM(void);                           // 데이터를 EEPROM에 저장합니다.
 
 bool EEPROMPL_LoadFromFlash(tsEEPROM_Config *config); // Flash 에서 파라미터 데이터를 로드합니다.

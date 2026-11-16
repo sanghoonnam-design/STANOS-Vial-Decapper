@@ -62,7 +62,7 @@ tsXCommandMapping gCoreCommandTable[] = {
     {1, "DI", /*        */ CMD_Handle_DI, /*					*/ "Get GPIO input.", /*				*/ "DI (ch 1~16)"},                         // GPIO 출력값 쓰기
 
 	{1, "LOAD", /*		*/ CMD_Handle_LOADE, /*					*/ "Read Params from EEPROM.(Ctrl+L)", /*	*/ "LOADE"}, // EEPROM 에서 읽어옴.
-	{1, "SAVE", /*      */ CMD_Handle_SAVEE, /*					*/ "Param. save to EEPROM.(Ctrl+S)", /*		*/ "SAVEE"},   // EEPROM 저장
+	{1, "SAVE", /*      */ CMD_Handle_SAVEE, /*					*/ "Save a taught axis or all RAM parameters.", /*		*/ "SAVE Z | SAVE R | SAVE 1"},   // EEPROM 저장
 
 	/*===============================Vial Decapper API 이외의 Command=================================================================================================================================*/
 	//{1, "SETIP", /*     */ CMD_Handle_SetIP, /*               */ "Set IP", /*                      */ "SETIP 192,168,0,150"}, // IP 셋팅
@@ -323,13 +323,14 @@ void CMD_Handle_Get_FAS_IO_State(const tsXParsedData *parsedData, U08 useTCP)
 
 /**
  * @brief GERR/ERR: 인자 없이 현재 공통 오류 코드 문자열을 응답한다.
- * 오류를 해제하거나 Decapper 오류 상태를 새로 동기화하지는 않는다.
+ * 유지 중인 첫 Decapper 오류를 다시 반영한 뒤 조회한다.
  */
 void CMD_Handle_GERR(const tsXParsedData *parsedData, U08 useTCP)
 {
 
     if (parsedData->ParamCount == 0)
     {
+        CDecap_ReportError();
         XBuffer_AddString(xSendMsg, GetErrorCode_char(), NO_COMMA);
     }
     else
@@ -342,13 +343,15 @@ void CMD_Handle_GERR(const tsXParsedData *parsedData, U08 useTCP)
 }
 
 /**
- * @brief GERD/ERD: 인자 없이 현재 공통 오류의 설명 문자열을 응답한다.
+ * @brief GERD/ERD: 첫 Decapper 오류의 상세 문구 또는 현재 공통 오류 설명을 응답한다.
  */
 void CMD_Handle_GERD(const tsXParsedData *parsedData, U08 useTCP)
 {
     if (parsedData->ParamCount == 0)
     {
-        XBuffer_AddString(xSendMsg, GetErrorMessage(), NO_COMMA);
+        CDecap_ReportError();
+        const char *detail = CDecap_GetFaultDetail();
+        XBuffer_AddString(xSendMsg, detail ? detail : GetErrorMessage(), NO_COMMA);
     }
     else
     {
@@ -390,28 +393,60 @@ static bool CMD_BeginMaintenance(void){
 }
 
 /**
- * @brief 대기 상태에서 PL을 EEPROM에 저장한다.
- * RPOS 저장 후보가 있으면 먼저 ZCap_UpPos에 반영한다. 유지보수 잠금 획득 후에만 주기 타이머를 정지한다.
+ * @brief SAVE Z/R은 지정 축의 RPOS 좌표만 저장한다. SAVE 1은 현재 RAM 설정 전체를 저장한다.
  */
-void CMD_Handle_SAVEE(const tsXParsedData *p, U08 comm) {
-    bool explicitSave = p->ParamCount==1 && p->Params[0].type==PARAM_TYPE_INT && p->Params[0].value._int==1;
-    if(p->ParamCount!=0 && !explicitSave){XBuffer_AddString(xSendMsg,"INVALID",NO_COMMA);return;}
-    if(!CMD_BeginMaintenance())return;
-    S32 previous=xPL.Decapper.ZCap_UpPos;
-    if(!explicitSave && gZCapUpPosSavePending) {
-        if(!CDecap_IsValidTarget(aZ,gZCapUpPosPendingValue)) {
-            CDecap_EndMaintenance();XBuffer_AddString(xSendMsg,"RANGE",NO_COMMA);return;
-        }
-        xPL.Decapper.ZCap_UpPos=gZCapUpPosPendingValue;
+void CMD_Handle_SAVEE(const tsXParsedData *p, U08 comm){
+    if (p->ParamCount != 1 || p->Params[0].type != PARAM_TYPE_INT){
+        XBuffer_AddString(xSendMsg, "INVALID", NO_COMMA);
+        return;
     }
+
+    int selection = p->Params[0].value._int;
+    bool saveAll = selection == 1;
+    if (!saveAll && selection != 'Z' && selection != 'R'){
+        XBuffer_AddString(xSendMsg, "INVALID", NO_COMMA);
+        return;
+    }
+    if (!CMD_BeginMaintenance()) return;
+
+    U08 axis = selection == 'R' ? aR : aZ;
+    bool *pending = axis == aZ ? &gZCapUpPosSavePending : &gRDecapPosSavePending;
+    S32 target = axis == aZ ? gZCapUpPosPendingValue : gRDecapPosPendingValue;
+    if (!saveAll && !*pending){
+        CDecap_EndMaintenance();
+        XBuffer_AddString(xSendMsg, "NO_RPOS", NO_COMMA);
+        return;
+    }
+    if (!saveAll && (!CDecap_IsValidTarget(axis, target) ||
+                     (axis == aR && !CDecap_IsValidTarget(aR, 0)))){
+        CDecap_EndMaintenance();
+        XBuffer_AddString(xSendMsg, "RANGE", NO_COMMA);
+        return;
+    }
+
     XTimer_Stop();
-    xPL.Header.UpdateDate=SWRTC_GetTime_YYMMDDHH();
-    bool saved=EEPROMPL_SaveVerified();
+    bool saved;
+    if (saveAll){
+        U32 previousDate = xPL.Header.UpdateDate;
+        xPL.Header.UpdateDate = SWRTC_GetTime_YYMMDDHH();
+        saved = EEPROMPL_SaveVerified();
+        if (saved){
+            gZCapUpPosSavePending = false;
+            gRDecapPosSavePending = false;
+        }
+        else xPL.Header.UpdateDate = previousDate;
+    }
+    else {
+        saved = EEPROMPL_SaveDecapperTarget(axis, target);
+        if (saved){
+            if (axis == aZ) xPL.Decapper.ZCap_UpPos = target;
+            else xPL.Decapper.RDecapPos = target;
+            *pending = false;
+        }
+    }
     XTimer_Start();
-    if(saved)gZCapUpPosSavePending=false;
-    else if(!explicitSave)xPL.Decapper.ZCap_UpPos=previous;
     CDecap_EndMaintenance();
-    XBuffer_AddString(xSendMsg,saved?"OK":"FAIL",NO_COMMA);
+    XBuffer_AddString(xSendMsg, saved ? "OK" : "FAIL", NO_COMMA);
 }
 
 /**
@@ -472,10 +507,10 @@ void CMD_Handle_LOADE(const tsXParsedData *p, U08 comm) {
     if(!CMD_BeginMaintenance())return;
     XTimer_Stop();
     bool loaded=EEPROMPL_LoadFromEEPROM(&gEEPROM);
-    if(loaded) {
-        SYSPL_UpdateSystemParams();
+    if (loaded){
         CDecap_Init(); /* idle-only reconfiguration invalidates the home reference */
         gZCapUpPosSavePending=false;
+        gRDecapPosSavePending=false;
     }
     XTimer_Start();
     CDecap_EndMaintenance();

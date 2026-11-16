@@ -38,7 +38,7 @@ VOID TASK_UpdateSIGData(void *pvParameters)
             //===============================================================
             startTick = ITIMER_StartMeasure_us();
             __xTaskStatus[TP_IDX_taskUSD] = true;
-
+            IOEXP_UpdateCache(); // IOEXP 디지털 입력 캐시 업데이트.
             if (xSystemInfo.PL_Get_FW_Mode() == FW_MODE_IDLE)
             {
                 gTick_USD = ITIMER_StopMeasure_us(startTick);
@@ -48,7 +48,6 @@ VOID TASK_UpdateSIGData(void *pvParameters)
             XTP_CheckTaskUsingLED(XHW_STATUS_LED_2);
             //===============================================================
             xCDecap.Senser_Update();
-            xCDecap.Status_Update();//
             //===============================================================
             gTick_USD = ITIMER_StopMeasure_us(startTick);
             __TASK_TRIGGER_END_Using(TEST_PORT_1, TP_IDX_taskUSD);

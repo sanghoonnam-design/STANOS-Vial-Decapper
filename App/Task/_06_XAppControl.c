@@ -18,6 +18,8 @@
 #include "CDecap.h"
 
 Semaphore_Handle semHD_APC;
+SemaphoreHandle_t xMutex_DecapperMotion;
+static StaticSemaphore_t sDecapperMotionMutex;
 
 static U32 Control_StartTime = __2sec;
 
@@ -49,7 +51,11 @@ VOID TASK_ApplicationControl(void *pvParameters)
             }
             XTP_CheckTaskUsingLED(XHW_STATUS_LED_4);
             //==================================================================
-            xCDecap.Action_Fnc(xAT);
+            /* 명령의 TMC429 좌표 조회와 제어 주기의 SPI 접근을 직렬화한다. */
+            if (xSemaphoreTake(xMutex_DecapperMotion, portMAX_DELAY) == pdTRUE) {
+                xCDecap.Action_Fnc(xAT);
+                xSemaphoreGive(xMutex_DecapperMotion);
+            }
             //==================================================================
             gTick_APC = ITIMER_StopMeasure_us(startTick);
             __TASK_TRIGGER_END_Using(TEST_PORT_1, TP_IDX_taskAPC);
@@ -65,6 +71,7 @@ VOID TASK_ApplicationControl(void *pvParameters)
 int Init_ApplicationControl(int Index)
 {
     semHD_APC = xSemaphoreCreateBinary();
+    xMutex_DecapperMotion = xSemaphoreCreateMutexStatic(&sDecapperMotionMutex);
     CDecap_Init();
     return EXIT_SUCCESS;
 }

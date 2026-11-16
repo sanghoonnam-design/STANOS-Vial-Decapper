@@ -73,37 +73,6 @@ void Network_ResetReceive(int socketId) {
     if (socketId >= 0 && socketId < 8) memset(&sFrames[socketId], 0, sizeof(sFrames[0]));
 }
 
-#if 0
-void Network_MsgProcess(int MsgId, int MsgLength, char *pData)
-{
-    if (gTriggerCount < __5sec) /* [주의]: 수정 금지 */
-    {
-        /* [] 상태머신 시작전에는 무시. */
-        // 부팅후 5초간 상위로직에서 보내는 명령 무시
-        // 개발간에 FW 다운로드시에 PC 에서 명령을 빠르게 계속 보내면 문제가 발생할수 있다.
-        return; // 제어 로직 안정화 시간
-    }
-
-    teXParsingErrorCode result = xParser_ProcessReceivedData(pData, &xParsedData_Network, COMM_TCP);
-
-    if (result == PARSER_ERR_SUCCESS)
-    {
-        Handle_command(&xParsedData_Network, COMM_TCP);
-
-        if (gCurrentError.severity == _INFO || gCurrentError.severity == _WARNING)
-        {
-            SetErrorCode(ERROR_CODE_NONE);
-            // xPrintError(gCurrentError.Code);
-        }
-        else // _CRITICAL
-        {
-            // TODO: USER CODE
-            // _CRITICAL : 이면.. 에러 유지
-            //
-        }
-    }
-}
-#else
 void Network_MsgProcess(int MsgId, int MsgLength, char *pData) {
     if (MsgId < 0 || MsgId >= 8 || !pData || MsgLength <= 0) return;
     if (gTriggerCount < __5sec) {
@@ -133,4 +102,3 @@ void Network_MsgProcess(int MsgId, int MsgLength, char *pData) {
         Network_ResetReceive(MsgId);
     }
 }
-#endif

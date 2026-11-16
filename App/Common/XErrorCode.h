@@ -30,54 +30,15 @@ typedef enum
     ERROR_CODE_INVALID_COMMAND /*          */ = 2100,
     ERROR_CODE_INVALID_ARGUMENT /*         */ = 2110,
 
-    /** @brief USER CODE BEGIN */
-    ERROR_CODE_SYSTEM_MOVING_STATUS /*     */ = 2105,
-
-    ERROR_CODE_ROBOT_DOOR_NOT_INIT /*      */ = 2106, // 초기화가 안되어 있음.
-    ERROR_CODE_ROBOT_DOOR_TIMEOUT /*       */ = 2107, // 제어가 정상적이지 않고 timeout 이 발생했어.
-    ERROR_CODE_ROBOT_DOOR_ALREADY_OPEN /*  */ = 2117, // 이미 문 열려있어 이놈아.
-    ERROR_CODE_ROBOT_DOOR_ALREADY_CLOSE /* */ = 2118, // 이미 문 닫혀있어 이놈아.
-    ERROR_CODE_ROBOT_DOOR_MOVING /*        */ = 2119, // 로봇 움직이고 있어.
-    ERROR_CODE_ROBOT_DOOR_NOT_CLOSE /*     */ = 2120, // 로봇 door 닫히지 않음.
-    ERROR_CODE_ROBOT_DOOR_NOT_OPEN /*      */ = 2121, // 로봇 door 열리지 않음.
-
-    ERROR_CODE_CENT_BLOCKED_DOOR_OPEN /*   */ = 2130, // Safety interlock: door open blocks centrifuge
-    // ERROR_CODE_CENT_RUNNING /*             */ = 2135, // centrifuge running
-
-    ERROR_CODE_LESS_TOTAL_TIME /*          */ = 2220,
-    ERROR_CODE_LESS_ACCEL_DECEL_TIME /*    */ = 2230,
-
-    ERROR_CODE_REFRIGERATOR_TH1_ERROR /*   */ = 2410,
-    ERROR_CODE_REFRIGERATOR_TH2_ERROR /*   */ = 2420,
-    ERROR_CODE_REFRIGERATOR_NOT_COMM /*    */ = 2430,
-    ERROR_CODE_REFRIGERATOR_NOT_COOLING /* */ = 2440,
-    ERROR_CODE_REFRIGERATOR_NOT_INIT /*    */ = 2450,
-
-    ERROR_CODE_A6_DRIVER_ERROR /*          */ = 2500,
-    ERROR_CODE_A6_DRIVER_NOT_CONNECTED /*  */ = 2510,
-
-    ERROR_CODE_A6_SERVO_TIMEOUT /*         */ = 2600,
-    ERROR_CODE_A6_SERVO_NOT_INIT /*        */ = 2610,
-    ERROR_CODE_A6_SERVO_NOT_HOME /*        */ = 2620,
-    ERROR_CODE_A6_SERVO_OFF /*             */ = 2630,
-    ERROR_CODE_A6_SERVO_ON_FAIL /*         */ = 2640,
-    ERROR_CODE_A6_SERVO_OFF_FAIL /*        */ = 2650,
-    ERROR_CODE_A6_SERVO_HOME_FAIL /*       */ = 2660,
-    ERROR_CODE_A6_SERVO_JOG_FAIL /*        */ = 2670,
-    ERROR_CODE_A6_SERVO_CENT_FAIL /*       */ = 2680,
-    ERROR_CODE_A6_SERVO_SLOT_FAIL /*       */ = 2690,
-    ERROR_CODE_A6_SERVO_MOVE_FAIL /*       */ = 2700,
-
     ERROR_CODE_DECAP_TIMEOUT = 2800,
     ERROR_CODE_DECAP_LIMIT = 2810,
     ERROR_CODE_DECAP_STATE = 2820,
-
-    ERROR_CODE_ERROR_STATE_MACHINE /*      */ = 6000,
-    ERROR_CODE_INVALID_SUBSTEP /*          */ = 6010,
-
-    // ERROR_CODE_NO_REACH_TARGET_SPEED /*    */ = 2701
-
-    /** @brief USER CODE END */
+    ERROR_CODE_DECAP_Z_HOME_NOT_REACHED = 2850,
+    ERROR_CODE_DECAP_Z_HOME_NOT_RELEASED = 2851,
+    ERROR_CODE_DECAP_Y_FORWARD_NOT_REACHED = 2860,
+    ERROR_CODE_DECAP_Y_BACK_NOT_REACHED = 2861,
+    ERROR_CODE_DECAP_CAP_OPEN_NOT_CONFIRMED = 2870,
+    ERROR_CODE_DECAP_BODY_HOLD_NOT_CONFIRMED = 2880,
 
 } teErrorCode;
 

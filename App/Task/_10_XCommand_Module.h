@@ -17,6 +17,8 @@ extern const tsXCommandMapping gModuleCommandTable[];
 extern const int gModuleCommandCount;
 extern bool gZCapUpPosSavePending;
 extern S32 gZCapUpPosPendingValue;
+extern bool gRDecapPosSavePending;
+extern S32 gRDecapPosPendingValue;
 void CMD_Handle_GPOS(const tsXParsedData *, U08);
 void CMD_Handle_TEACH(const tsXParsedData *, U08);
 void CMD_Handle_PGET(const tsXParsedData *, U08);
@@ -143,9 +145,5 @@ void CMD_Handle_DI(const tsXParsedData *parsedData, U08 useTCP);
 
 /** @brief 현재 Z pulse를 조회하고 ZCap_UpPos 저장 후보로 보관한다. */
 void CMD_Handle_RPOS(const tsXParsedData *parsedData, U08 useTCP);
-
-//Unused Command
-/** @brief 공통 Busy·오류 상태를 진단 출력하는 미등록 디버그 핸들러이다. */
-void CMD_Handle_PSTA(const tsXParsedData *parsedData, U08 useTCP);
 
 #endif /* _XCOMMAND_MODULE_H_ */

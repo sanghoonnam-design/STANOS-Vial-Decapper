@@ -23,59 +23,16 @@ const tsErrorEntry gErrorTable[] =
         {ERROR_CODE_INVALID_COMMAND, /*          */ _WARNING, /*  */ "Invalid command."},
         {ERROR_CODE_INVALID_ARGUMENT, /*         */ _WARNING, /*  */ "The input parameter is invalid."},
 
-        //==================================================================
-        // USER DEFINED ERROR CODES
-        //==================================================================
-        {ERROR_CODE_SYSTEM_MOVING_STATUS, /*     */ _WARNING, /* */ "Centrifuge is running."},
-
-        {ERROR_CODE_ROBOT_DOOR_NOT_INIT, /*      */ _CRITICAL, /* */ "Robot door is not initialized."},
-        {ERROR_CODE_ROBOT_DOOR_TIMEOUT, /*       */ _CRITICAL, /* */ "Robot door operation timed out."},
-        {ERROR_CODE_ROBOT_DOOR_ALREADY_OPEN, /*  */ _WARNING, /*  */ "The robot door is already open."},
-        {ERROR_CODE_ROBOT_DOOR_ALREADY_CLOSE, /* */ _WARNING, /*  */ "The robot door is already closed."},
-        {ERROR_CODE_ROBOT_DOOR_MOVING, /*        */ _WARNING, /*  */ "The robot door is moving."},
-        {ERROR_CODE_ROBOT_DOOR_NOT_CLOSE, /*     */ _WARNING, /*  */ "The robot door is not closed."},
-        {ERROR_CODE_ROBOT_DOOR_NOT_OPEN, /*      */ _WARNING, /*  */ "The robot door is not open."},
-
-        {ERROR_CODE_CENT_BLOCKED_DOOR_OPEN, /*   */ _CRITICAL, /* */ "Centrifuge blocked: Robot door is open."},
-        // {ERROR_CODE_CENT_RUNNING, /*             */ _CRITICAL, /* */ "Centrifuge is running."},
-
-        {ERROR_CODE_LESS_TOTAL_TIME, /*          */ _CRITICAL, /* */ "Total time is too short."},
-        {ERROR_CODE_LESS_ACCEL_DECEL_TIME, /*    */ _CRITICAL, /* */ "Acceleration or deceleration time is too short."},
-
-        {ERROR_CODE_REFRIGERATOR_TH1_ERROR, /*   */ _CRITICAL, /* */ "Refrigerator sensor 1 failure."},
-        {ERROR_CODE_REFRIGERATOR_TH2_ERROR, /*   */ _CRITICAL, /* */ "Refrigerator sensor 2 failure."},
-        {ERROR_CODE_REFRIGERATOR_NOT_COMM, /*    */ _CRITICAL, /* */ "Refrigerator communication error."},
-        {ERROR_CODE_REFRIGERATOR_NOT_COOLING, /* */ _CRITICAL, /* */ "Refrigerator not cooling properly."},
-        {ERROR_CODE_REFRIGERATOR_NOT_INIT, /*    */ _CRITICAL, /* */ "Refrigerator not initialized."},
-
-        {ERROR_CODE_A6_DRIVER_ERROR, /*          */ _CRITICAL, /* */ "Servo driver error detected."},
-        {ERROR_CODE_A6_DRIVER_NOT_CONNECTED, /*  */ _CRITICAL, /* */ "Servo driver not connected."},
-
-        {ERROR_CODE_A6_SERVO_TIMEOUT, /*         */ _CRITICAL, /* */ "Servo driver operation timed out."},
-        {ERROR_CODE_A6_SERVO_NOT_INIT, /*        */ _CRITICAL, /* */ "Servo driver: not initialized."},
-        {ERROR_CODE_A6_SERVO_NOT_HOME, /*        */ _CRITICAL, /* */ "Servo driver: not homed."},
-        {ERROR_CODE_A6_SERVO_OFF, /*             */ _CRITICAL, /* */ "Servo driver is OFF."},
-        {ERROR_CODE_A6_SERVO_ON_FAIL, /*         */ _CRITICAL, /* */ "Servo ON failed."},
-        {ERROR_CODE_A6_SERVO_OFF_FAIL, /*        */ _CRITICAL, /* */ "Servo OFF failed."},
-        {ERROR_CODE_A6_SERVO_HOME_FAIL, /*       */ _CRITICAL, /* */ "[Home] command failed."},
-        {ERROR_CODE_A6_SERVO_JOG_FAIL, /*        */ _CRITICAL, /* */ "[Jog] command failed."},
-        {ERROR_CODE_A6_SERVO_CENT_FAIL, /*       */ _CRITICAL, /* */ "[Cent] command failed."},
-        {ERROR_CODE_A6_SERVO_SLOT_FAIL, /*       */ _CRITICAL, /* */ "[Slot] command failed."},
-        {ERROR_CODE_A6_SERVO_MOVE_FAIL, /*       */ _CRITICAL, /* */ "movement failed."},
-
         {ERROR_CODE_DECAP_TIMEOUT, _CRITICAL, "Decapper motion timed out."},
         {ERROR_CODE_DECAP_LIMIT, _CRITICAL, "Decapper position limit exceeded or invalid."},
         {ERROR_CODE_DECAP_STATE, _CRITICAL, "Decapper fault requires clear."},
+        {ERROR_CODE_DECAP_Z_HOME_NOT_REACHED, _CRITICAL, "Z home sensor not reached."},
+        {ERROR_CODE_DECAP_Z_HOME_NOT_RELEASED, _CRITICAL, "Z home sensor did not release."},
+        {ERROR_CODE_DECAP_Y_FORWARD_NOT_REACHED, _CRITICAL, "Y Forward limit not reached."},
+        {ERROR_CODE_DECAP_Y_BACK_NOT_REACHED, _CRITICAL, "Y Back limit not reached."},
+        {ERROR_CODE_DECAP_CAP_OPEN_NOT_CONFIRMED, _CRITICAL, "Cap open sensor not confirmed."},
+        {ERROR_CODE_DECAP_BODY_HOLD_NOT_CONFIRMED, _CRITICAL, "Body hold sensors not confirmed."},
 
-        {ERROR_CODE_ERROR_STATE_MACHINE, /*      */ _INTERNAL, /*  */ "State-machine error."},
-        {ERROR_CODE_INVALID_SUBSTEP, /*          */ _INTERNAL, /*  */ "Invalid sub-step."},
-
-
-        // {ERROR_CODE_NO_REACH_TARGET_SPEED, /*    */ _CRITICAL, /* */ "Target speed (RPM) not reached."},
-
-        //==================================================================
-        /** @brief USER CODE END */
-        //==================================================================
         {(teErrorCode)9999, (teErrorSeverity)0, 0}};
 
 static const char *ErrorSeverityStr[] = {

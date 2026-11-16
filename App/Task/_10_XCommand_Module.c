@@ -9,16 +9,22 @@
  *             1. 최대 USB 명령, RS232/485, TCP/UDP 통신 모듈이 공통으로 사용하는 구조로
  *                설계됨.
  ******************************************************************************/
+#include <limits.h>
+
 #include "XSystemInfo.h"
 #include "_10_XCommand_Module.h"
 #include "XSystem_DB.h"
 #include "TMC429.h"
 #include "_04_XDiagnose.h"
+#include "_06_XAppControl.h"
 
 // #include "_04_XDiagnose_Def.h"
 
 bool gZCapUpPosSavePending = false;
 S32 gZCapUpPosPendingValue = 0;
+/* R 후보는 부호를 유지한 DECAP 절대좌표이며 CAP의 목표는 0이다. */
+bool gRDecapPosSavePending = false;
+S32 gRDecapPosPendingValue = 0;
 
 /* 명령 핸들러는 인자를 검사하고 요청을 등록한다. 구동은 주기 FSM에서 수행한다.
  * 응답 버퍼의 OK/home/Cap 등은 접수 결과이며 완료 상태는 GSTA/SL로 확인한다.
@@ -71,7 +77,7 @@ const tsXCommandMapping gModuleCommandTable[] =
 
 		{1, "BGRIP", /*     */ CMD_Handle_BGRIP, /*           */ "Set body gripper output.", /*     	*/ "BGRIP <0|1>"}, // Body 그리퍼 출력 요청
 		{1, "CGRIP", /*     */ CMD_Handle_CGRIP, /*           */ "Set cap gripper output.", /*      	*/ "CGRIP <0|1>"}, // Cap 그리퍼 출력 요청
-		{1, "RPOS", /*		*/ CMD_Handle_RPOS, /*            */ "Read current Z position.", /*      	*/ "RPOS"}, // 현재 Z 좌표 조회 및 SAVEE 저장 후보 설정
+		{1, "RPOS", /*		*/ CMD_Handle_RPOS, /*            */ "Capture Z/R teaching position.", /*      	*/ "RPOS [Z|R] (default: both)"}, // 기본은 ZCap_UpPos와 RDecapPos를 함께 캡처
 
         /** @note USER CODE END */
 };
@@ -105,7 +111,7 @@ static bool CMD_RejectIfDecapperBusy(void) {
 
 /**
  * @brief 지정 인덱스의 숫자 인자를 int로 읽어 out에 저장한다.
- * 정수 또는 실수를 허용하며 실수는 정수 변환된다. 잘못된 포인터·인덱스·타입은 NO, 성공은 YES이다.
+ * int 범위의 정확한 정수만 허용한다. 1.0처럼 정수와 같은 실수 표기도 받는다.
  */
 __attribute__((unused)) static int GetParamInt(const tsXParsedData *parsedData, int index, int *out)
 {
@@ -123,7 +129,11 @@ __attribute__((unused)) static int GetParamInt(const tsXParsedData *parsedData, 
 
     if (parsedData->Params[index].type == PARAM_TYPE_FLOAT)
     {
-        *out = (int)parsedData->Params[index].value._float;
+        double value = parsedData->Params[index].value._float;
+        if (!(value >= INT_MIN && value <= INT_MAX)) return NO;
+        int integer = (int)value;
+        if (value != integer) return NO;
+        *out = integer;
         return YES;
     }
 
@@ -216,29 +226,33 @@ void CMD_Handle_SPEED(const tsXParsedData *parsedData, U08 useTCP){
     }
 }
 
+static void CMD_ReplyInvalidArgument(const tsXParsedData *parsedData, const char *caller, int line) {
+    SetErrorCode(ERROR_CODE_INVALID_ARGUMENT, caller, line);
+    XBuffer_AddString(xSendMsg, GetErrorCode_char(), NO_COMMA);
+    if (parsedData->ParamCount > 0 && parsedData->Params[0].value._int != '?')
+        xParser_HandleError(caller, PARSER_ERR_INVALID_CMD, 0);
+}
+
+static bool CMD_QueueAction(teXActionType action) {
+    if (CMD_RejectIfDecapperBusy()) return false;
+    if (CDecap_TryRequestAction(action)) return true;
+    XBuffer_AddString(xSendMsg, "BUSY", NO_COMMA);
+    return false;
+}
+
 /**
  * @brief 인자 없는 HOME을 검사하고 원점 탐색 요청을 등록한다.
  * 응답 home은 접수 의미이며 실제 완료는 GSTA의 Homed/Busy로 확인한다.
  */
 void CMD_Handle_HOME(const tsXParsedData *parsedData, U08 useTCP) {
-    if (parsedData->ParamCount == 0) {
-        if (CMD_RejectIfDecapperBusy()) return;
-
-        if (!CDecap_TryRequestAction(ACTION_HOME)){
-
-            XBuffer_AddString(xSendMsg, "BUSY", NO_COMMA);
-
-            return;
-
-        }
-        XBuffer_AddString(xSendMsg, "home", NO_COMMA);
+    if (parsedData->ParamCount != 0){
+        CMD_ReplyInvalidArgument(parsedData, __func__, __LINE__);
+        return;
     }
-    else {
-        SetErrorCode(ERROR_CODE_INVALID_ARGUMENT, __func__, __LINE__);
-        XBuffer_AddString(xSendMsg, GetErrorCode_char(), NO_COMMA);
-        if (parsedData->Params[0].value._int != '?')
-            xParser_HandleError(__func__, PARSER_ERR_INVALID_CMD, 0);
-    }
+    if (!CMD_QueueAction(ACTION_HOME)) return;
+    gZCapUpPosSavePending = false;
+    gRDecapPosSavePending = false;
+    XBuffer_AddString(xSendMsg, "home", NO_COMMA);
 }
 
 /**
@@ -246,60 +260,38 @@ void CMD_Handle_HOME(const tsXParsedData *parsedData, U08 useTCP) {
  * 일반 Busy 검사 없이 오류·동작 중에도 접수하며 실제 정지는 다음 FSM 실행에서 처리한다.
  */
 void CMD_Handle_STOP(const tsXParsedData *parsedData, U08 useTCP) {
-    if (parsedData->ParamCount == 0) {
-        CDecap_RequestStop();
-        XBuffer_AddString(xSendMsg, "stop", NO_COMMA);
+    if (parsedData->ParamCount != 0){
+        CMD_ReplyInvalidArgument(parsedData, __func__, __LINE__);
+        return;
     }
-    else {
-        SetErrorCode(ERROR_CODE_INVALID_ARGUMENT, __func__, __LINE__);
-        XBuffer_AddString(xSendMsg, GetErrorCode_char(), NO_COMMA);
-        if (parsedData->Params[0].value._int != '?')
-            xParser_HandleError(__func__, PARSER_ERR_INVALID_CMD, 0);
-    }
+    CDecap_RequestStop();
+    XBuffer_AddString(xSendMsg, "stop", NO_COMMA);
 }
 
 /**
- * @brief Busy일 때 일시정지 요청을 등록한다.
- * 실제 허용 대상은 FSM의 CAP/DECAP/LONGRUN이다. pause 응답만으로 일시정지 완료를 뜻하지 않는다.
+ * @brief CAP/DECAP/LONGRUN 중 일시정지 요청을 접수한다.
+ * pause 응답은 접수 결과이며 실제 정지는 제어 주기에서 수행한다.
  */
 void CMD_Handle_PAUSE(const tsXParsedData *parsedData, U08 useTCP) {
-    if (parsedData->ParamCount == 0) {
-        if (xSL.isBusy == YES) {
-            xAT = ACTION_PAUSE;
-            XBuffer_AddString(xSendMsg, "pause", NO_COMMA);
-        }
-        else {
-            XBuffer_AddString(xSendMsg, "isbusy = no -> not pause", NO_COMMA);
-        }
+    if (parsedData->ParamCount != 0){
+        CMD_ReplyInvalidArgument(parsedData, __func__, __LINE__);
+        return;
     }
-    else {
-        SetErrorCode(ERROR_CODE_INVALID_ARGUMENT, __func__, __LINE__);
-        XBuffer_AddString(xSendMsg, GetErrorCode_char(), NO_COMMA);
-        if (parsedData->Params[0].value._int != '?')
-            xParser_HandleError(__func__, PARSER_ERR_INVALID_CMD, 0);
-    }
+    bool accepted = CDecap_TryRequestPause(true);
+    XBuffer_AddString(xSendMsg, accepted ? "pause" : "INVALID", NO_COMMA);
 }
 
 /**
- * @brief Busy일 때 재개 요청을 등록한다.
- * FSM이 일시정지 상태와 저장 문맥을 확인한 뒤 재개 여부를 결정한다.
+ * @brief 일시정지가 적용된 뒤에만 재개 요청을 접수한다.
+ * resume 응답은 접수 결과이며 이전 동작은 제어 주기에서 재개한다.
  */
 void CMD_Handle_RESUME(const tsXParsedData *parsedData, U08 useTCP) {
-    if (parsedData->ParamCount == 0) {
-        if (xSL.isBusy == YES) {
-            xAT = ACTION_RESUME;
-            XBuffer_AddString(xSendMsg, "resume", NO_COMMA);
-        }
-        else {
-            XBuffer_AddString(xSendMsg, "isbusy = no -> not pause", NO_COMMA);
-        }
+    if (parsedData->ParamCount != 0){
+        CMD_ReplyInvalidArgument(parsedData, __func__, __LINE__);
+        return;
     }
-    else {
-        SetErrorCode(ERROR_CODE_INVALID_ARGUMENT, __func__, __LINE__);
-        XBuffer_AddString(xSendMsg, GetErrorCode_char(), NO_COMMA);
-        if (parsedData->Params[0].value._int != '?')
-            xParser_HandleError(__func__, PARSER_ERR_INVALID_CMD, 0);
-    }
+    bool accepted = CDecap_TryRequestPause(false);
+    XBuffer_AddString(xSendMsg, accepted ? "resume" : "INVALID", NO_COMMA);
 }
 
 /**
@@ -307,24 +299,12 @@ void CMD_Handle_RESUME(const tsXParsedData *parsedData, U08 useTCP) {
  * CT 감지와 HOME 완료 판단 및 실제 구동은 Decapper FSM이 수행한다.
  */
 void CMD_Handle_DECAP(const tsXParsedData *parsedData, U08 useTCP) {
-    if (parsedData->ParamCount == 0) {
-        if (CMD_RejectIfDecapperBusy())
-            return;
-
-        if (!CDecap_TryRequestAction(ACTION_DECAP)){
-
-            XBuffer_AddString(xSendMsg, "BUSY", NO_COMMA);
-
-            return;
-
-        }
-        XBuffer_AddString(xSendMsg, "Decap", NO_COMMA);
+    if (parsedData->ParamCount != 0){
+        CMD_ReplyInvalidArgument(parsedData, __func__, __LINE__);
+        return;
     }
-    else {
-        SetErrorCode(ERROR_CODE_INVALID_ARGUMENT, __func__, __LINE__);
-        XBuffer_AddString(xSendMsg, GetErrorCode_char(), NO_COMMA);
-        if (parsedData->Params[0].value._int != '?')
-            xParser_HandleError(__func__, PARSER_ERR_INVALID_CMD, 0);
+    if (CMD_QueueAction(ACTION_DECAP)){
+        XBuffer_AddString(xSendMsg, "Decap", NO_COMMA);
     }
 }
 
@@ -333,24 +313,12 @@ void CMD_Handle_DECAP(const tsXParsedData *parsedData, U08 useTCP) {
  * 응답은 접수 결과이며 체결·복귀 완료는 상태 조회로 확인한다.
  */
 void CMD_Handle_CAP(const tsXParsedData *parsedData, U08 useTCP) {
-    if (parsedData->ParamCount == 0) {
-        if (CMD_RejectIfDecapperBusy())
-            return;
-
-        if (!CDecap_TryRequestAction(ACTION_CAP)){
-
-            XBuffer_AddString(xSendMsg, "BUSY", NO_COMMA);
-
-            return;
-
-        }
-        XBuffer_AddString(xSendMsg, "Cap", NO_COMMA);
+    if (parsedData->ParamCount != 0){
+        CMD_ReplyInvalidArgument(parsedData, __func__, __LINE__);
+        return;
     }
-    else {
-        SetErrorCode(ERROR_CODE_INVALID_ARGUMENT, __func__, __LINE__);
-        XBuffer_AddString(xSendMsg, GetErrorCode_char(), NO_COMMA);
-        if (parsedData->Params[0].value._int != '?')
-            xParser_HandleError(__func__, PARSER_ERR_INVALID_CMD, 0);
+    if (CMD_QueueAction(ACTION_CAP)){
+        XBuffer_AddString(xSendMsg, "Cap", NO_COMMA);
     }
 }
 
@@ -561,171 +529,6 @@ static int RPL_SetParameter(int index, const tsXParsedData *parsedData)
 
         xPL.Header.DG_Client2Host_LogMode = value_i;
         LOG_MSG_SEND("[PL] Set DG_Client2Host_LogMode = %d", xPL.Header.DG_Client2Host_LogMode);
-        return YES;
-
-    /* --- Robot Door --- */
-    case RPL_SET_DOOR_DIRECTION:
-        if (GetParamInt(parsedData, 1, &value_i) == NO)
-            return NO;
-
-//        xPL.Door.Direction = value_i;
-//        LOG_MSG_SEND("[PL] Set Door.Direction = %d", xPL.Door.Direction);
-        return YES;
-
-    case RPL_SET_DOOR_CONTROL_TIMEOUT:
-        if (GetParamInt(parsedData, 1, &value_i) == NO || value_i < 0)
-            return NO;
-
-        return YES;
-
-    case RPL_SET_DOOR_CLOSE_OVERTIME:
-        if (GetParamInt(parsedData, 1, &value_i) == NO || value_i < 0)
-            return NO;
-
-        return YES;
-
-    case RPL_SET_DOOR_OPEN_OVERTIME:
-        if (GetParamInt(parsedData, 1, &value_i) == NO || value_i < 0)
-            return NO;
-
-        return YES;
-
-    case RPL_SET_DOOR_RELATIVE_DISTANCE:
-        if (GetParamInt(parsedData, 1, &value_i) == NO || value_i < 0)
-            return NO;
-
-        return YES;
-
-    case RPL_SET_DOOR_MOTOR_SPEED:
-        if (GetParamInt(parsedData, 1, &value_i) == NO || value_i < 0)
-            return NO;
-
-        return YES;
-
-    case RPL_SET_DOOR_MOTOR_ACCEL:
-        if (GetParamInt(parsedData, 1, &value_i) == NO || value_i < 0)
-            return NO;
-
-        return YES;
-
-    case RPL_SET_DOOR_MOTOR_NORMAL_CURRENT:
-        if (GetParamFloat(parsedData, 1, &value_f) == NO || value_f < 0.0f)
-            return NO;
-
-        return YES;
-
-    case RPL_SET_DOOR_MOTOR_HOLDING_CURRENT:
-        if (GetParamInt(parsedData, 1, &value_i) == NO || value_i < 0)
-            return NO;
-
-        return YES;
-
-    case RPL_SET_DOOR_MOTOR_RESOLUTION:
-        if (GetParamInt(parsedData, 1, &value_i) == NO || value_i < 0)
-            return NO;
-
-        return YES;
-
-    /* --- Servo A6 --- */
-    case RPL_SET_SERVO_DIRECTION:
-        if (GetParamInt(parsedData, 1, &value_i) == NO)
-            return NO;
-
-//        xPL.ServoA6.Direction = value_i;
-//        LOG_MSG_SEND("[PL] Set ServoA6.Direction = %d", xPL.ServoA6.Direction);
-        return YES;
-
-    case RPL_SET_SERVO_PULSE_PER_REV:
-        if (GetParamInt(parsedData, 1, &value_i) == NO || value_i <= 0)
-            return NO;
-
-        return YES;
-
-    case RPL_SET_SERVO_HOME_FWD_SPEED:
-        if (GetParamFloat(parsedData, 1, &value_f) == NO)
-            return NO;
-
-        return YES;
-
-    case RPL_SET_SERVO_HOME_BWD_SPEED:
-        if (GetParamFloat(parsedData, 1, &value_f) == NO)
-            return NO;
-
-        return YES;
-
-    case RPL_SET_SERVO_HOME_ACCEL:
-        if (GetParamFloat(parsedData, 1, &value_f) == NO)
-            return NO;
-
-        return YES;
-
-    case RPL_SET_SERVO_HOME_OFFSET:
-        if (GetParamFloat(parsedData, 1, &value_f) == NO)
-            return NO;
-
-        return YES;
-
-    case RPL_SET_SERVO_SLOT_SPEED:
-        if (GetParamFloat(parsedData, 1, &value_f) == NO)
-            return NO;
-
-        return YES;
-
-    case RPL_SET_SERVO_SLOT_ACCEL:
-        if (GetParamFloat(parsedData, 1, &value_f) == NO)
-            return NO;
-
-        return YES;
-
-    case RPL_SET_SERVO_SLOT_DECEL:
-        if (GetParamFloat(parsedData, 1, &value_f) == NO)
-            return NO;
-
-        return YES;
-
-    case RPL_SET_SERVO_SLOT_POSITION_OFFSET ...(RPL_SET_SERVO_SLOT_POSITION_OFFSET + SLOT_COUNT - 1):
-    {
-        /* slot 위치 오프셋: slot 1~6 을 index 연속으로 사용, PL <idx>,<value> */
-        if (GetParamInt(parsedData, 1, &value_i) == NO || value_i < 0)
-            return NO;
-
-        return YES;
-    }
-
-    case RPL_SET_SERVO_JOG_SPEED:
-        if (GetParamFloat(parsedData, 1, &value_f) == NO)
-            return NO;
-
-        return YES;
-
-    case RPL_SET_SERVO_JOG_ACCEL:
-        if (GetParamFloat(parsedData, 1, &value_f) == NO)
-            return NO;
-
-        return YES;
-
-    case RPL_SET_SERVO_JOG_DECEL:
-        if (GetParamFloat(parsedData, 1, &value_f) == NO)
-            return NO;
-
-        return YES;
-
-    case RPL_SET_SERVO_BASE_SPEED:
-        if (GetParamFloat(parsedData, 1, &value_f) == NO)
-            return NO;
-
-        return YES;
-
-    case RPL_SET_SERVO_BASE_ACCEL:
-        if (GetParamFloat(parsedData, 1, &value_f) == NO)
-            return NO;
-
-        return YES;
-
-    case RPL_SET_SERVO_BASE_DECEL:
-        if (GetParamFloat(parsedData, 1, &value_f) == NO)
-            return NO;
-
         return YES;
 
     /* --- Vial Decapper --- */
@@ -1025,7 +828,7 @@ static void RPL_PrintHelp(void){
     xprintf("\t  [%2d] %-51s : %8ld : S32, pulse/s",
             RPL_SET_DECAP_R_VEL, "xPL.Decapper.RDecapVel", (long)xPL.Decapper.RDecapVel);
     xprintf("\t  [%2d] %-51s : %8ld : S32, pulse",
-            RPL_SET_DECAP_R_POS, "xPL.Decapper.RDecapPos", (long)xPL.Decapper.RDecapPos);
+            RPL_SET_DECAP_R_POS, "xPL.Decapper.RDecapPos (DECAP abs; CAP=0)", (long)xPL.Decapper.RDecapPos);
 
     xprintf("\t----------------------------------------------------------------------");
     xprintf("\tExample:");
@@ -1078,6 +881,8 @@ void CMD_Handle_Print_PL(const tsXParsedData *parsedData, U08 useTCP) {
             return;
         }
 
+        gZCapUpPosSavePending = false;
+        gRDecapPosSavePending = false;
         CDecap_EndMaintenance();
         XBuffer_AddString(xSendMsg, "OK", NO_COMMA);
         return;
@@ -1112,24 +917,12 @@ void CMD_Handle_Print_PL(const tsXParsedData *parsedData, U08 useTCP) {
  * HOME을 새로 수행하는 명령이 아니며 미원점 상태의 처리는 FSM이 결정한다.
  */
 void CMD_Handle_ORIGIN(const tsXParsedData *parsedData, U08 useTCP) {
-    if (parsedData->ParamCount == 0){
-        if (CMD_RejectIfDecapperBusy())
-            return;
-
-        if (!CDecap_TryRequestAction(ACTION_ORIGIN)){
-
-            XBuffer_AddString(xSendMsg, "BUSY", NO_COMMA);
-
-            return;
-
-        }
-        XBuffer_AddString(xSendMsg, "origin", NO_COMMA);
+    if (parsedData->ParamCount != 0){
+        CMD_ReplyInvalidArgument(parsedData, __func__, __LINE__);
+        return;
     }
-    else {
-        SetErrorCode(ERROR_CODE_INVALID_ARGUMENT, __func__, __LINE__);
-        XBuffer_AddString(xSendMsg, GetErrorCode_char(), NO_COMMA);
-        if (parsedData->Params[0].value._int != '?')
-            xParser_HandleError(__func__, PARSER_ERR_INVALID_CMD, 0);
+    if (CMD_QueueAction(ACTION_ORIGIN)){
+        XBuffer_AddString(xSendMsg, "origin", NO_COMMA);
     }
 }
 
@@ -1151,19 +944,22 @@ void CMD_Handle_MOVE(const tsXParsedData *parsedData, U08 useTCP) {
         if (CMD_RejectIfDecapperBusy())
             return;
 
-        if (axis == 'Z') {
-            xCD.Decapper.Motor_TargetPos[aZ] = (S32)pulse;
-            if (!CDecap_TryRequestAction((mode == 'R') ? ACTION_RMOVEZ : ACTION_AMOVEZ)){
-                XBuffer_AddString(xSendMsg, "BUSY", NO_COMMA);
-                return;
-            }
+        U08 channel = axis == 'Z' ? aZ : aR;
+        teXActionType action;
+        if (channel == aZ) {
+            action = mode == 'R' ? ACTION_RMOVEZ : ACTION_AMOVEZ;
         }
         else {
-            xCD.Decapper.Motor_TargetPos[aR] = (S32)pulse;
-            if (!CDecap_TryRequestAction((mode == 'R') ? ACTION_RROTATE : ACTION_AROTATE)){
-                XBuffer_AddString(xSendMsg, "BUSY", NO_COMMA);
-                return;
-            }
+            action = mode == 'R' ? ACTION_RROTATE : ACTION_AROTATE;
+        }
+
+        taskENTER_CRITICAL();
+        bool accepted = CDecap_TryRequestAction(action);
+        if (accepted) xCD.Decapper.Motor_TargetPos[channel] = (S32)pulse;
+        taskEXIT_CRITICAL();
+        if (!accepted) {
+            XBuffer_AddString(xSendMsg, "BUSY", NO_COMMA);
+            return;
         }
 
         XBuffer_AddString(xSendMsg, "OK", NO_COMMA);
@@ -1183,28 +979,13 @@ void CMD_Handle_MOVE(const tsXParsedData *parsedData, U08 useTCP) {
  */
 void CMD_Handle_READY(const tsXParsedData *parsedData, U08 useTCP) {
     int value;
-
-    if ((parsedData->ParamCount == 1) &&
-        (GetParamInt(parsedData, 0, &value) == YES) &&
-        ((value == 0) || (value == 1))) {
-        if (CMD_RejectIfDecapperBusy())
-            return;
-
-        if (!CDecap_TryRequestAction((value == 1) ? ACTION_Y_B_MOVE : ACTION_Y_F_MOVE)){
-
-            XBuffer_AddString(xSendMsg, "BUSY", NO_COMMA);
-
-            return;
-
-        }
-        XBuffer_AddString(xSendMsg, "OK", NO_COMMA);
+    if (parsedData->ParamCount != 1 || GetParamInt(parsedData, 0, &value) == NO ||
+        (value != 0 && value != 1)){
+        CMD_ReplyInvalidArgument(parsedData, __func__, __LINE__);
+        return;
     }
-    else {
-        SetErrorCode(ERROR_CODE_INVALID_ARGUMENT, __func__, __LINE__);
-        XBuffer_AddString(xSendMsg, GetErrorCode_char(), NO_COMMA);
-        if ((parsedData->ParamCount > 0) &&
-            (parsedData->Params[0].value._int != '?'))
-            xParser_HandleError(__func__, PARSER_ERR_INVALID_CMD, 0);
+    if (CMD_QueueAction(value == 1 ? ACTION_Y_B_MOVE : ACTION_Y_F_MOVE)){
+        XBuffer_AddString(xSendMsg, "OK", NO_COMMA);
     }
 }
 
@@ -1213,24 +994,12 @@ void CMD_Handle_READY(const tsXParsedData *parsedData, U08 useTCP) {
  * 대기·오류 확인 후 접수하며 시험에 필요한 기구 준비는 별도로 되어 있어야 한다.
  */
 void CMD_Handle_UDECAP(const tsXParsedData *parsedData, U08 useTCP) {
-    if (parsedData->ParamCount == 0) {
-        if (CMD_RejectIfDecapperBusy())
-            return;
-
-        if (!CDecap_TryRequestAction(ACTION_UDECAP)){
-
-            XBuffer_AddString(xSendMsg, "BUSY", NO_COMMA);
-
-            return;
-
-        }
-        XBuffer_AddString(xSendMsg, "udecap", NO_COMMA);
+    if (parsedData->ParamCount != 0){
+        CMD_ReplyInvalidArgument(parsedData, __func__, __LINE__);
+        return;
     }
-    else {
-        SetErrorCode(ERROR_CODE_INVALID_ARGUMENT, __func__, __LINE__);
-        XBuffer_AddString(xSendMsg, GetErrorCode_char(), NO_COMMA);
-        if (parsedData->Params[0].value._int != '?')
-            xParser_HandleError(__func__, PARSER_ERR_INVALID_CMD, 0);
+    if (CMD_QueueAction(ACTION_UDECAP)){
+        XBuffer_AddString(xSendMsg, "udecap", NO_COMMA);
     }
 }
 
@@ -1239,24 +1008,12 @@ void CMD_Handle_UDECAP(const tsXParsedData *parsedData, U08 useTCP) {
  * 대기·오류 확인 후 접수하며 실제 진행은 유닛 FSM이 담당한다.
  */
 void CMD_Handle_UCAP(const tsXParsedData *parsedData, U08 useTCP) {
-    if (parsedData->ParamCount == 0) {
-        if (CMD_RejectIfDecapperBusy())
-            return;
-
-        if (!CDecap_TryRequestAction(ACTION_UCAP)){
-
-            XBuffer_AddString(xSendMsg, "BUSY", NO_COMMA);
-
-            return;
-
-        }
-        XBuffer_AddString(xSendMsg, "ucap", NO_COMMA);
+    if (parsedData->ParamCount != 0){
+        CMD_ReplyInvalidArgument(parsedData, __func__, __LINE__);
+        return;
     }
-    else {
-        SetErrorCode(ERROR_CODE_INVALID_ARGUMENT, __func__, __LINE__);
-        XBuffer_AddString(xSendMsg, GetErrorCode_char(), NO_COMMA);
-        if (parsedData->Params[0].value._int != '?')
-            xParser_HandleError(__func__, PARSER_ERR_INVALID_CMD, 0);
+    if (CMD_QueueAction(ACTION_UCAP)){
+        XBuffer_AddString(xSendMsg, "ucap", NO_COMMA);
     }
 }
 
@@ -1274,33 +1031,29 @@ void CMD_Handle_LongRun(const tsXParsedData *p, U08 useTCP) {
     XBuffer_AddString(xSendMsg,"LR",NO_COMMA);
 }
 
+static void CMD_RequestGrip(const tsXParsedData *parsedData, teXActionType action,
+                            U08 *request, const char *caller, int line) {
+    int value;
+    if (parsedData->ParamCount != 1 || GetParamInt(parsedData, 0, &value) == NO ||
+        (value != 0 && value != 1)){
+        CMD_ReplyInvalidArgument(parsedData, caller, line);
+        return;
+    }
+    if (CMD_RejectIfDecapperBusy()) return;
+
+    taskENTER_CRITICAL();
+    bool accepted = CDecap_TryRequestAction(action);
+    if (accepted) *request = (U08)value;
+    taskEXIT_CRITICAL();
+    XBuffer_AddString(xSendMsg, accepted ? "OK" : "BUSY", NO_COMMA);
+}
+
 /**
  * @brief BGRIP 0/1을 Body 그리퍼 요청값으로 저장하고 수동 출력 액션을 등록한다.
  * OK는 접수 결과이며 그리퍼 센서 도착을 확인한 응답은 아니다.
  */
 void CMD_Handle_BGRIP(const tsXParsedData *parsedData, U08 useTCP) {
-    int value;
-
-    if ((parsedData->ParamCount == 1) &&
-    		(GetParamInt(parsedData, 0, &value) == YES) &&
-        ((value == 0) || (value == 1))) {
-        if (CMD_RejectIfDecapperBusy())
-            return;
-
-        CDecap_SetBodyGripCommand((U08)value);
-        if (!CDecap_TryRequestAction(ACTION_BODY_GRIP)){
-            XBuffer_AddString(xSendMsg, "BUSY", NO_COMMA);
-            return;
-        }
-        XBuffer_AddString(xSendMsg, "OK", NO_COMMA);
-    }
-    else {
-        SetErrorCode(ERROR_CODE_INVALID_ARGUMENT, __func__, __LINE__);
-        XBuffer_AddString(xSendMsg, GetErrorCode_char(), NO_COMMA);
-        if ((parsedData->ParamCount > 0) &&
-            (parsedData->Params[0].value._int != '?'))
-            xParser_HandleError(__func__, PARSER_ERR_INVALID_CMD, 0);
-    }
+    CMD_RequestGrip(parsedData, ACTION_BODY_GRIP, &xCD.CT.Body, __func__, __LINE__);
 }
 
 /**
@@ -1308,90 +1061,49 @@ void CMD_Handle_BGRIP(const tsXParsedData *parsedData, U08 useTCP) {
  * OK는 접수 결과이며 그리퍼 센서 도착을 확인한 응답은 아니다.
  */
 void CMD_Handle_CGRIP(const tsXParsedData *parsedData, U08 useTCP) {
-    int value;
+    CMD_RequestGrip(parsedData, ACTION_CAP_GRIP, &xCD.CT.Cap, __func__, __LINE__);
+}
 
-    if ((parsedData->ParamCount == 1) &&
-        (GetParamInt(parsedData, 0, &value) == YES) &&
-        ((value == 0) || (value == 1))) {
-        if (CMD_RejectIfDecapperBusy())
-            return;
-
-        CDecap_SetCapGripCommand((U08)value);
-        if (!CDecap_TryRequestAction(ACTION_CAP_GRIP)){
-            XBuffer_AddString(xSendMsg, "BUSY", NO_COMMA);
+/**
+ * @brief 요청한 Z/R 현재좌표를 읽어 출력하고 SAVE 후보로 보관한다.
+ * RPOS는 Z/R을 함께, RPOS Z/R은 지정한 축을 읽는다. 응답 순서는 Z,R이다.
+ * 움직이는 중에도 조회하며 실제 파라미터 반영과 범위 검증은 SAVE에서 수행한다.
+ */
+void CMD_Handle_RPOS(const tsXParsedData *p, U08 comm) {
+    bool captureZ = p->ParamCount == 0;
+    bool captureR = p->ParamCount == 0;
+    if (p->ParamCount == 1 && p->Params[0].type == PARAM_TYPE_INT){
+        int axis = p->Params[0].value._int;
+        if (axis != 'Z' && axis != 'R'){
+            XBuffer_AddString(xSendMsg, "INVALID", NO_COMMA);
             return;
         }
-        XBuffer_AddString(xSendMsg, "OK", NO_COMMA);
+        captureZ = axis == 'Z';
+        captureR = axis == 'R';
     }
-    else {
-        SetErrorCode(ERROR_CODE_INVALID_ARGUMENT, __func__, __LINE__);
-        XBuffer_AddString(xSendMsg, GetErrorCode_char(), NO_COMMA);
-        if ((parsedData->ParamCount > 0) &&
-            (parsedData->Params[0].value._int != '?'))
-            xParser_HandleError(__func__, PARSER_ERR_INVALID_CMD, 0);
+    else if (p->ParamCount != 0){
+        XBuffer_AddString(xSendMsg, "INVALID", NO_COMMA);
+        return;
     }
-}
 
-/**
- * @brief 현재 Z pulse를 조회하고 ZCap_UpPos 저장 후보로 보관한다.
- * 여기서는 PL/EEPROM을 변경하지 않는다. 이후 SAVEE가 후보를 PL에 반영하고 저장한다.
- */
-void CMD_Handle_RPOS(const tsXParsedData *parsedData, U08 useTCP) {
-    if (parsedData->ParamCount == 0){
-        gZCapUpPosPendingValue = CDecap_GetZPosition();
-        XBuffer_AddInt(xSendMsg, (int)gZCapUpPosPendingValue, NO_COMMA);
+    if (xSemaphoreTake(xMutex_DecapperMotion, 0) != pdTRUE) {
+        XBuffer_AddString(xSendMsg, "BUSY", NO_COMMA);
+        return;
+    }
+    S32 z = captureZ ? TMC429_GetPosition(aZ) : 0;
+    S32 r = captureR ? TMC429_GetPosition(aR) : 0;
+    xSemaphoreGive(xMutex_DecapperMotion);
+    if (captureZ){
+        xCD.Decapper.Motor_CurPos = z;
+        gZCapUpPosPendingValue = z;
         gZCapUpPosSavePending = true;
-        xprintf("Currunt Z_Position = %ld",xCD.Decapper.Motor_CurPos);
     }
-    else {
-        SetErrorCode(ERROR_CODE_INVALID_ARGUMENT, __func__, __LINE__);
-        XBuffer_AddString(xSendMsg, GetErrorCode_char(), NO_COMMA);
-        if (parsedData->Params[0].value._int != '?')
-            xParser_HandleError(__func__, PARSER_ERR_INVALID_CMD, 0);
+    if (captureR){
+        gRDecapPosPendingValue = r;
+        gRDecapPosSavePending = true;
     }
-}
-
-/*Unused Command*/
-// debugging code
-/**
- * @brief 공통 Busy·오류 상태를 진단 출력하는 미등록 디버그 핸들러이다.
- * 현재 모듈 명령 테이블에서 사용하는 SL/GSTA와 구분한다.
- */
-void CMD_Handle_PSTA(const tsXParsedData *parsedData, U08 useTCP)
-{
-    U08 i = 1;
-
-    if (parsedData->ParamCount == 0)
-    {
-        __newLine();
-        xcprintf(ANSI_TX_Yellow);
-        /*[ 1]*/ xprintf("\t[%2d] %6d : xSL.isBusy", i++, xSL.isBusy);
-        //*[ 2]*/ xprintf("\t[%2d] %6d : xServoA6.IsServoOn()", i++, xServoA6.IsServoOn());
-        //*[ 3]*/ xprintf("\t[%2d] %6d : xServoA6.IsHomed()", i++, xServoA6.IsHomed());
-        /*[ 4]*/ xprintf("\t[%2d] %6d : IsError()", i++, IsError());
-        /*[ 5]*/ xprintf("\t[%2d] %6s : error code.", i++, GetErrorCode_char());
-        xcprintf(ANSI_TX_Cyan);
-        //*[ 7]*/ xprintf("\t[%2d] %6d : xServoA6.GetPosition_SlotNum() + 1", i++, xServoA6.GetPosition_SlotNum() + 1);
-        xcprintf(ANSI_TX_ORG);
-        //*[ 9]*/ xprintf("\t[%2d] %6d : xServoA6.IsDriverError()", i++, xServoA6.IsDriverError());
-        xcprintf(ANSI_TX_Red);
-        /*[13]*/ xprintf("\t[%2d] %6d : rsv.", i++, 0);
-        /*[14]*/ xprintf("\t[%2d] %6d : rsv.", i++, 0);
-        /*[15]*/ xprintf("\t[%2d] %6d : rsv.", i++, 0);
-        /*[16]*/ xprintf("\t[%2d] %6d : rsv.", i++, 0);
-        /*[17]*/ xprintf("\t[%2d] %6d : rsv.", i++, 0);
-        /*[18]*/ xprintf("\t[%2d] %6d : rsv.", i++, 0);
-        /*[19]*/ xprintf("\t[%2d] %6d : rsv.", i++, 0);
-        /*[20]*/ xprintf("\t[%2d] %6d : rsv.", i++, 0);
-        xcprintf(ANSI_TX_ORG);
-    }
-    else
-    {
-        SetErrorCode(ERROR_CODE_INVALID_ARGUMENT, __func__, __LINE__);
-        XBuffer_AddString(xSendMsg, GetErrorCode_char(), NO_COMMA);
-        if (parsedData->Params[0].value._int != '?')
-            xParser_HandleError(__func__, PARSER_ERR_INVALID_CMD, 0);
-    }
+    if (captureZ) XBuffer_AddInt(xSendMsg, z, captureR ? COMMA : NO_COMMA);
+    if (captureR) XBuffer_AddInt(xSendMsg, r, NO_COMMA);
 }
 
 /* Schema 1 responses are compact command-prefixed CSV on every command transport. */
@@ -1410,16 +1122,24 @@ void CMD_Handle_GPOS(const tsXParsedData *p, U08 comm) {
         (p->Params[0].value._int!='Z' && p->Params[0].value._int!='R')) {
         XBuffer_AddString(xSendMsg, "INVALID", NO_COMMA); return;
     }
-    int axis=p->Params[0].value._int;
-    XBuffer_AddString(xSendMsg, axis=='Z'?"Z":"R", COMMA);
-    XBuffer_AddInt(xSendMsg, TMC429_GetPosition(axis=='Z'?aZ:aR), NO_COMMA);
+    int axis = p->Params[0].value._int;
+    if (xSemaphoreTake(xMutex_DecapperMotion, 0) != pdTRUE) {
+        XBuffer_AddString(xSendMsg, "BUSY", NO_COMMA);
+        return;
+    }
+    S32 position = TMC429_GetPosition(axis == 'Z' ? aZ : aR);
+    xSemaphoreGive(xMutex_DecapperMotion);
+    XBuffer_AddString(xSendMsg, axis == 'Z' ? "Z" : "R", COMMA);
+    XBuffer_AddInt(xSendMsg, position, NO_COMMA);
 }
+
 static void API_AddParamFloat(float value) {
     char text[32];
     /* Nine significant decimal digits round-trip a 32-bit float. */
     snprintf(text,sizeof(text),"%.9g",(double)value);
     XBuffer_AddString(xSendMsg,text,NO_COMMA);
 }
+
 void CMD_Handle_PGET(const tsXParsedData *p, U08 comm) {
     if (p->ParamCount!=1 || p->Params[0].type!=PARAM_TYPE_INT) {
         XBuffer_AddString(xSendMsg,"INVALID",NO_COMMA); return;
@@ -1471,7 +1191,10 @@ void CMD_Handle_TEACH(const tsXParsedData *p, U08 comm) {
     }
 
     bool ok=RPL_SetParameter(idx,p)==YES;
-    if(ok) gZCapUpPosSavePending=false;
+    if(ok){
+        gZCapUpPosSavePending=false;
+        gRDecapPosSavePending=false;
+    }
     CDecap_EndMaintenance();
     XBuffer_AddString(xSendMsg,ok?"OK":"INVALID",NO_COMMA);
 }

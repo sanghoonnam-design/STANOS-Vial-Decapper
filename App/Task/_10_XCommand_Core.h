@@ -93,7 +93,7 @@ extern const int gModuleCommandCount;
 void CMD_Handle_VERS(const tsXParsedData *parsedData, U08 useTCP);
 /** @brief GERR/ERR: 인자 없이 현재 공통 오류 코드 문자열을 응답한다. */
 void CMD_Handle_GERR(const tsXParsedData *parsedData, U08 useTCP);
-/** @brief GERD/ERD: 인자 없이 현재 공통 오류의 설명 문자열을 응답한다. */
+/** @brief GERD/ERD: 첫 Decapper 오류의 상세 문구 또는 현재 공통 오류 설명을 응답한다. */
 void CMD_Handle_GERD(const tsXParsedData *parsedData, U08 useTCP);
 /** @brief 대기 상태에서만 Decapper 오류를 명시적으로 해제한다. 동작/대기 요청이 있으면 BUSY를 응답한다. */
 void CMD_Handle_CLER(const tsXParsedData *parsedData, U08 useTCP);

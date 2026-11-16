@@ -224,52 +224,21 @@ void SYSPL_UpdateFromEeprom_Flash(tsEEPROM_Config *config)
     ERR_MSG_SEND("[Step 3] SYSPL_FactorySetting() - completed in %lu ms", elapsedTime);
 }
 
-/**
- * @brief EEPROM 에서만 데이터 로드
- * @return 성공여부
- */
+/** @brief 검증된 최신 EEPROM 레코드를 불러와 시스템 설정에 적용한다. */
 bool EEPROMPL_LoadFromEEPROM(tsEEPROM_Config *config)
 {
+    if (!config) return false;
+
+    static tsEEPROM_Config loaded;
     U08 latestBlock;
-
-    xprintf("Loading from EEPROM... (size : %d bytes) ", sizeof(tsEEPROM_Config));
     uint32_t startTime = HAL_GetTick();
-    uint32_t elapsedTime;
+    if (!FindLatestValidBlock(&latestBlock) || !EEPROM_ReadBlock(latestBlock, &loaded)) return false;
 
-    //[]. 1단계: 최신데이터 검색
-    if (FindLatestValidBlock(&latestBlock) && EEPROM_ReadBlock(latestBlock, config))
-    {
-        xprintf("Valid block found, validating EEPROM data...");
-        if (ValidateEEPROMData(config))
-        {
-            SYSPL_DefaultSetting();                                                             // 초기화를 시켜야 되는 파라미터 처리
-                                                                                                //
-            elapsedTime = HAL_GetTick() - startTime;                                            //
-            xprintf("[Step 1] EEPROM loaded successfully! - completed in %lu ms", elapsedTime); //
-
-            return true; // 정상적으로 로드됨
-        }
-        else
-        { // read backup data
-
-            if (EEPROMPL_RestoreFromEEPROMBackup(latestBlock) && EEPROM_ReadBlock(latestBlock, config)) // 백업하고 다시 읽어옴(재확인).
-            {
-                SYSPL_DefaultSetting();
-
-                elapsedTime = HAL_GetTick() - startTime;
-                xprintf("[Step 1-1] EEPROM backup successfully! - completed in %lu ms", elapsedTime);
-
-                return true;
-            }
-            else
-            {
-                // TODO 에러코드 추가
-                ERR_MSG_SEND("EEPROM Backup failed...");
-            }
-        }
-    }
-
-    return false;
+    gEEPROM = loaded;
+    if (config != &gEEPROM) *config = loaded;
+    SYSPL_DefaultSetting();
+    xprintf("EEPROM block %u loaded in %lu ms", latestBlock, HAL_GetTick() - startTime);
+    return true;
 }
 
 /**
@@ -409,9 +378,10 @@ bool FindLatestValidBlock(U08 *latestBlock)
     return found;
 }
 #else
-static bool FindLatestValidBlock(U08 *latestBlock) // 속도 개선 버전
+static bool FindLatestValidBlock(U08 *latestBlock)
 {
-    uint16_t maxUpdateCount = 0;
+    static tsEEPROM_Config candidate;
+    U16 latestCount = 0;
     bool found = false;
 
     // xprintf("Finding latest valid block...");
@@ -425,7 +395,7 @@ static bool FindLatestValidBlock(U08 *latestBlock) // 속도 개선 버전
         {
             U16 updateCount;
             U32 factorySetConfirmKey;
-        } tempData;
+        } tempData = {0};
 #pragma pack(pop)
 
         // 읽을 데이터: FactorySetConfirm_Key와 updateCount만
@@ -433,18 +403,16 @@ static bool FindLatestValidBlock(U08 *latestBlock) // 속도 개선 버전
 
         //        xprintf("Block %d: ConfirmKey = 0x%08X, updateCount = %d", i, tempData.factorySetConfirmKey, tempData.updateCount);
 
-        // Factory setting 확인 및 updateCount 확인
-        if (tempData.factorySetConfirmKey == EEPROM_FACTORY_SETTING_KEY)
-        {
-            if (tempData.updateCount >= maxUpdateCount)
-            {
-                maxUpdateCount = tempData.updateCount;
-                *latestBlock = i;
-                found = true;
-                //                xprintf("Found valid block %d with updateCount %d", i, tempData.updateCount);
-            }
+        /* 슬롯 수보다 충분히 큰 16비트 순환 카운터로 최신 순서를 비교한다. */
+        U16 delta = (U16)(tempData.updateCount - latestCount);
+        if (tempData.factorySetConfirmKey == EEPROM_FACTORY_SETTING_KEY &&
+            (!found || delta < 0x8000U) && EEPROM_ReadBlock((U08)i, &candidate)){
+            latestCount = candidate.updateCount;
+            *latestBlock = (U08)i;
+            found = true;
         }
     }
+    isEEPROM_OK = found ? YES : NO;
 
     if (!found)
     {
@@ -505,6 +473,12 @@ bool EEPROM_WriteBlock(U08 blockIndex, tsEEPROM_Config *config)
 //     return true;
 // }
 
+static bool EEPROM_VerifyBlock(U08 blockIndex, const tsEEPROM_Config *config){
+    static tsEEPROM_Config readback;
+    return EEPROM_ReadBlock(blockIndex, &readback) &&
+           memcmp(&readback, config, sizeof(readback)) == 0;
+}
+
 static bool EEPROM_WriteBlock(U08 blockIndex, const tsEEPROM_Config *config)
 {
     U08 backupBlock = (blockIndex + 1) % EEPROM_MAX_BLOCKS; // 미러링을 위한 백업 블록 선택
@@ -526,13 +500,10 @@ static bool EEPROM_WriteBlock(U08 blockIndex, const tsEEPROM_Config *config)
         written += chunk;
     }
 
-    // [2] 백업 블록의 데이터가 정상적으로 쓰였는지 확인
-    static tsEEPROM_Config verifyConfig;
-    EEPROM_ReadBytes(backupAddress, (U08 *)&verifyConfig, sizeof(tsEEPROM_Config));
-    if (!ValidateEEPROMData(&verifyConfig) || memcmp(&verifyConfig, config, sizeof(*config)) != 0)
+    if (!EEPROM_VerifyBlock(backupBlock, config))
     {
         ERR_MSG_SEND("Backup block validation failed!");
-        return false; // 백업 블록이 손상되었으면 저장 중단
+        return false;
     }
 
     // [3] 백업 블록 데이터가 무결성 검사를 통과하면, 메인 블록에 저장
@@ -546,8 +517,7 @@ static bool EEPROM_WriteBlock(U08 blockIndex, const tsEEPROM_Config *config)
 
     xprintf("Successfully wrote block %d (Backup Block %d)...\r\n", blockIndex, backupBlock);
 
-    EEPROM_ReadBytes(mainAddress, (U08 *)&verifyConfig, sizeof(verifyConfig));
-    return ValidateEEPROMData(&verifyConfig) && memcmp(&verifyConfig, config, sizeof(*config)) == 0;
+    return EEPROM_VerifyBlock(blockIndex, config);
 }
 #endif
 
@@ -687,4 +657,26 @@ bool EEPROMPL_SaveVerified(void) {
     sLastSaveOK = false;
     EEPROMPL_SaveToEEPROM();
     return sLastSaveOK;
+}
+
+bool EEPROMPL_SaveDecapperTarget(U08 axis, S32 position){
+    static tsEEPROM_Config saved;
+    U08 latestBlock;
+    if (!FindLatestValidBlock(&latestBlock) || !EEPROM_ReadBlock(latestBlock, &saved)) return false;
+
+    tsXPL_Decapper parameters = saved.sysInfo.xPL.Decapper;
+    if (!CDecap_IsValidTargetFor(&parameters, axis, position) ||
+        (axis == aR && !CDecap_IsValidTargetFor(&parameters, aR, 0))) return false;
+
+    if (axis == aZ) saved.sysInfo.xPL.Decapper.ZCap_UpPos = position;
+    else saved.sysInfo.xPL.Decapper.RDecapPos = position;
+
+    ++saved.updateCount;
+    saved.crc = CRC_Calculate((U8 *)&saved, sizeof(saved) - sizeof(saved.crc));
+    U08 newBlock = (latestBlock + 1U) % EEPROM_MAX_BLOCKS;
+    U08 backupBlock = (newBlock + 1U) % EEPROM_MAX_BLOCKS;
+    /* 본 블록 쓰기에 실패해도 검증된 백업이 있으면 LOAD에서 복구할 수 있다. */
+    if (!EEPROM_WriteBlock(newBlock, &saved) && !EEPROM_VerifyBlock(backupBlock, &saved)) return false;
+    gEEPROM = saved;
+    return true;
 }

@@ -10,6 +10,7 @@
 #include "XGlobal.h"
 
 extern Semaphore_Handle semHD_APC;
+extern SemaphoreHandle_t xMutex_DecapperMotion;
 
 //==============================================================================
 //==============================================================================

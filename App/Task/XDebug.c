@@ -537,14 +537,9 @@ bool CLI_HandleSave(char c)
     xUsb.write((U8 *)&c, 1);
     xUsb.write((U8 *)"\r\n\0", 3);
 
-    XTimer_Stop();
     if (c == 'Y' || c == 'y')
     {
-        //        xPL.Header.UpdateDate = GetCurrentDate();
-        xprintf("..........."); // delay
-        // [YYMMDD] parameter를 EEPROM에 저장한 날짜 저장
-        xPL.Header.UpdateDate = SWRTC_GetTime_YYMMDDHH();
-        EEPROMPL_SaveToEEPROM();
+        Handle_command_by_string("SAVE 1", COMM_USB);
     }
     else
     {
@@ -552,8 +547,6 @@ bool CLI_HandleSave(char c)
     }
 
     gWait_SaveConfirm = false;
-
-    XTimer_Start();
 
     return true;
 }

@@ -18,8 +18,8 @@ bool gZCapUpPosSavePending; S32 gZCapUpPosPendingValue;
 U32 SWRTC_GetTime_YYMMDDHH(void){return 0;}
 void EEPROMPL_SaveToEEPROM(void){saves++;}
 bool EEPROMPL_SaveVerified(void){saves++;return saveOK;}
-bool EEPROMPL_LoadFromEEPROM(void*p){return loadOK;}
-void SYSPL_UpdateSystemParams(void){ramUpdates++;}
+bool EEPROMPL_SaveDecapperTarget(U08 axis,S32 position){saves++;return saveOK;}
+bool EEPROMPL_LoadFromEEPROM(void*p){if(loadOK)ramUpdates++;return loadOK;}
 struct {struct {int ip[4];int portNum;} network;} xSystemInfo;
 void SystemInfo_Network_SetIP(void*n,U08*ip){ipChanges++;}
 void XBuffer_AddInt(void*b,int v,int c){}
@@ -35,6 +35,7 @@ code+=r'''
 static int failures;
 #define CHECK(test,condition) do{if(!(condition)){printf("FAIL %s\n",test); failures++;}else printf("PASS %s\n",test);}while(0)
 int main(void){tsXParsedData cmd={0};http_request_ctx_t ctx={0};
+ cmd.ParamCount=1;cmd.Params[0].type=PARAM_TYPE_INT;cmd.Params[0].value._int=1;
  CDecap_Init();xSL.isBusy=1;CMD_Handle_SAVEE(&cmd,0);
  CHECK("busy SAVEE never stops timer or writes",timerStops==0 && saves==0);
  timerStops=saves=0;xSL.isBusy=0;xAT=ACTION_HOME;CMD_Handle_SAVEE(&cmd,0);

@@ -95,6 +95,14 @@
 #define SEC_TO_TICKS(sec) ((U32)((sec) * 1000.0f / (float)FW_TICK_MS))
 #define _TO_TICKS(ms) ((U32)((ms) * 1000.0f / (float)FW_TICK_MS))
 #define FW_TICK_MS (10)
+#define MS_TO_TICKS(ms) ((U32)(((uint64_t)(ms) + FW_TICK_MS - 1U) / FW_TICK_MS))
+
+/* 공압 대기 시간. 단위는 ms이며 실제 제어 주기(10ms) 단위로 올림한다. */
+#define BODY_GRIP_WAIT_MS        (1000U)
+#define CAP_GRIP_WAIT_MS         (1000U)
+#define CAP_UNGRIP_WAIT_MS       (1000U)
+/* 최소 대기 후 센서 완료를 추가로 기다리는 제한 시간이다. */
+#define GRIP_SENSOR_TIMEOUT_MS   (5000U)
 
 #define HOMING_TIMEOUT_MS		(5000U)
 #define CAPPING_TIMEOUT_MS		(5000U)
@@ -128,8 +136,8 @@
 /* CT 공압 그리퍼 출력 (DO 채널 번호 = 비트 번호 + 1) */
 #define AIR_CT_CAP_GRIP_PIN      (2)
 #define AIR_CT_CAP_UNGRIP_PIN    (3)
-#define AIR_CT_BODY_GRIP_PIN     (4)
-#define AIR_CT_BODY_UNGRIP_PIN   (5)
+#define AIR_CT_BODY_GRIP_PIN     (6) // DO7: GRIP
+#define AIR_CT_BODY_UNGRIP_PIN   (7) // DO8: UNGRIP
 
 typedef void (*FSM_Handler)(void);
 
@@ -295,7 +303,7 @@ typedef struct{
 
     U32 RDecapAcc;
     S32 RDecapVel;
-    S32 RDecapPos; // pulse 증분: CAP은 현재 R + 설정값, DECAP은 현재 R - 설정값
+    S32 RDecapPos; // 부호 있는 DECAP 절대목표 pulse; CAP은 HOME 기준 R=0으로 복귀
 
     int ForDebug[DEBUG_PL_SIZE];
 
@@ -342,6 +350,7 @@ typedef enum{
 	SUB_CAPPING,
 	SUB_DECAPPING,
     SUB_ACTION_COUNT,
+	SUB_CAP_UNGRIP_WAIT,
 	SUB_MAX
 } teDecapperSubIndex;
 
@@ -474,11 +483,15 @@ void CDecap_EndMaintenance(void);
  * 호출부가 유효한 일반 액션을 전달해야 한다. STOP은 RequestStop으로 별도 요청한다.
  */
 bool CDecap_TryRequestAction(teXActionType action);
+/** @brief 현재 Phase에서 허용되는 PAUSE(true) 또는 RESUME(false) 요청만 접수한다. */
+bool CDecap_TryRequestPause(bool pause);
 /**
  * @brief 유지 중인 Decapper 오류를 xSL 및 공통 오류 조회 값과 동기화한다.
  * isError가 있고 저장된 원인이 없으면 상태 오류 2820을 사용한다. 모션 출력은 변경하지 않는다.
  */
 void CDecap_ReportError(void);
+/** @brief 첫 Decapper 오류의 상세 문구를 반환한다. 기록이 없으면 NULL이다. */
+const char *CDecap_GetFaultDetail(void);
 /**
  * @brief Decapper 콜백, 상태 머신, Z/R 드라이버와 공압 출력을 초기화한다.
  * PL을 읽은 뒤 호출한다. 전류·분해능·리미트를 적용하고 위치 카운터를 0으로 설정한다.
@@ -516,20 +529,6 @@ void CDecapping_CheckSensorValidity(void);
  */
 void CDecap_Action_Statemachine(teXActionType actionType);
 /**
- * @brief Body 그리퍼 요청값을 xCD.CT.Body에 저장하고 수동 요청 플래그를 설정한다.
- * 즉시 출력하지 않으며 호출부가 ACTION_BODY_GRIP을 별도로 등록해야 한다.
- */
-void CDecap_SetBodyGripCommand(U08 onoff);
-/**
- * @brief Cap 그리퍼 요청값을 xCD.CT.Cap에 저장하고 수동 요청 플래그를 설정한다.
- * 즉시 출력하지 않으며 호출부가 ACTION_CAP_GRIP을 별도로 등록해야 한다.
- */
-void CDecap_SetCapGripCommand(U08 onoff);
-/**
- * @brief TMC429의 현재 Z pulse 좌표를 읽어 반환하고 xCD의 표시용 위치도 갱신한다.
- */
-S32 CDecap_GetZPosition(void);
-/**
  * @brief 새 이동 명령에 적용할 전체 속도 비율을 저장한다.
  * percent는 1~100만 허용하며 범위 밖이면 기존 값을 유지한다. 진행 중인 드라이버 명령을 재발행하지 않는다.
  */
@@ -539,6 +538,8 @@ void CDecap_SetSpeedPercent(U08 percent);
  */
 U08 CDecap_GetSpeedPercent(void);
 bool CDecap_IsValidTarget(U08 axis, S32 position);
+/** @brief 지정한 Decapper 설정의 기본·소프트 리미트로 목표 좌표를 검증한다. */
+bool CDecap_IsValidTargetFor(const tsXPL_Decapper *parameters, U08 axis, S32 position);
 int CDecap_GetPhase(void);
 bool CDecap_IsPaused(void);
 U32 CDecap_GetLongRunLimit(void);
