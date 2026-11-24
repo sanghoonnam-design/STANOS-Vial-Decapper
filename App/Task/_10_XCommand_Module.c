@@ -235,6 +235,11 @@ static void CMD_ReplyInvalidArgument(const tsXParsedData *parsedData, const char
 
 static bool CMD_QueueAction(teXActionType action) {
     if (CMD_RejectIfDecapperBusy()) return false;
+    /* 미원점 거절은 BUSY와 구분해 FAIL로 응답한다(접수 함수도 같은 조건으로 거절한다). */
+    if (CDecap_ActionNeedsHome(action) && !xSL.isHomed) {
+        XBuffer_AddString(xSendMsg, "FAIL", NO_COMMA);
+        return false;
+    }
     if (CDecap_TryRequestAction(action)) return true;
     XBuffer_AddString(xSendMsg, "BUSY", NO_COMMA);
     return false;
@@ -296,7 +301,7 @@ void CMD_Handle_RESUME(const tsXParsedData *parsedData, U08 useTCP) {
 
 /**
  * @brief 인자 없는 자동 DECAP 요청을 대기·오류 상태 확인 후 등록한다.
- * CT 감지와 HOME 완료 판단 및 실제 구동은 Decapper FSM이 수행한다.
+ * HOME 전에는 FAIL로 거절하고(CMD_QueueAction), CT 감지와 실제 구동은 Decapper FSM이 수행한다.
  */
 void CMD_Handle_DECAP(const tsXParsedData *parsedData, U08 useTCP) {
     if (parsedData->ParamCount != 0){
@@ -992,6 +997,7 @@ void CMD_Handle_READY(const tsXParsedData *parsedData, U08 useTCP) {
 /**
  * @brief Y/Body 자동 준비 과정을 생략하는 유닛 DECAP 시험 요청을 등록한다.
  * 대기·오류 확인 후 접수하며 시험에 필요한 기구 준비는 별도로 되어 있어야 한다.
+ * @note HOME 전에는 FAIL로 거절한다(CMD_QueueAction).
  */
 void CMD_Handle_UDECAP(const tsXParsedData *parsedData, U08 useTCP) {
     if (parsedData->ParamCount != 0){
@@ -1006,6 +1012,7 @@ void CMD_Handle_UDECAP(const tsXParsedData *parsedData, U08 useTCP) {
 /**
  * @brief Y/Body 자동 준비 과정을 생략하는 유닛 CAP 시험 요청을 등록한다.
  * 대기·오류 확인 후 접수하며 실제 진행은 유닛 FSM이 담당한다.
+ * @note HOME 전에는 FAIL로 거절한다(CMD_QueueAction).
  */
 void CMD_Handle_UCAP(const tsXParsedData *parsedData, U08 useTCP) {
     if (parsedData->ParamCount != 0){
@@ -1018,8 +1025,9 @@ void CMD_Handle_UCAP(const tsXParsedData *parsedData, U08 useTCP) {
 }
 
 /**
- * @brief LR/CAPDECAPLR 요청으로 유닛 DECAP/CAP 반복 시험을 시작하게 한다.
+ * @brief LR/CAPDECAPLR 요청으로 자동 DECAP/CAP(Y·Body 포함) 반복 시험을 시작하게 한다.
  * FSM 진입 시 반복 횟수를 초기화하며 STOP 또는 오류로 종료한다.
+ * @note HOME 전(isHomed=0)에는 전원 투입 위치가 0이라 좌표가 기구와 맞지 않으므로 FAIL로 거절한다.
  */
 void CMD_Handle_LongRun(const tsXParsedData *p, U08 useTCP) {
     U32 limit=0;
@@ -1027,6 +1035,7 @@ void CMD_Handle_LongRun(const tsXParsedData *p, U08 useTCP) {
         p->Params[0].value._int>=1 && p->Params[0].value._int<=1000000) limit=(U32)p->Params[0].value._int;
     else if(p->ParamCount!=0) {XBuffer_AddString(xSendMsg,"INVALID",NO_COMMA);return;}
     if(CMD_RejectIfDecapperBusy())return;
+    if(CDecap_ActionNeedsHome(ACTION_LONGRUN) && !xSL.isHomed){XBuffer_AddString(xSendMsg,"FAIL",NO_COMMA);return;}
     if(!CDecap_TryLongRun(limit)){XBuffer_AddString(xSendMsg,"BUSY",NO_COMMA);return;}
     XBuffer_AddString(xSendMsg,"LR",NO_COMMA);
 }
@@ -1090,8 +1099,8 @@ void CMD_Handle_RPOS(const tsXParsedData *p, U08 comm) {
         XBuffer_AddString(xSendMsg, "BUSY", NO_COMMA);
         return;
     }
-    S32 z = captureZ ? TMC429_GetPosition(aZ) : 0;
-    S32 r = captureR ? TMC429_GetPosition(aR) : 0;
+    S32 z = captureZ ? CDecap_GetAxisPosition(aZ) : 0; /* 앱 좌표(Z 아래 = +, 2026-11-20) */
+    S32 r = captureR ? CDecap_GetAxisPosition(aR) : 0;
     xSemaphoreGive(xMutex_DecapperMotion);
     if (captureZ){
         xCD.Decapper.Motor_CurPos = z;
@@ -1127,7 +1136,7 @@ void CMD_Handle_GPOS(const tsXParsedData *p, U08 comm) {
         XBuffer_AddString(xSendMsg, "BUSY", NO_COMMA);
         return;
     }
-    S32 position = TMC429_GetPosition(axis == 'Z' ? aZ : aR);
+    S32 position = CDecap_GetAxisPosition(axis == 'Z' ? aZ : aR); /* 앱 좌표(Z 아래 = +) */
     xSemaphoreGive(xMutex_DecapperMotion);
     XBuffer_AddString(xSendMsg, axis == 'Z' ? "Z" : "R", COMMA);
     XBuffer_AddInt(xSendMsg, position, NO_COMMA);
@@ -1214,11 +1223,13 @@ void CMD_Handle_GSTATE(const tsXParsedData *p, U08 comm) {
 }
 void CMD_Handle_GSENSOR(const tsXParsedData *p, U08 comm) {
     if(!API_NoArgs(p))return;
+    /* 2026-11-20 사용자 요청: 리밋(Z H/L, Y F/B)은 보기 편하게 1 = 감지로 응답한다.
+     * 내부 xSL 리밋 값(0 = 감지)과 판정 로직은 그대로이며 표기만 반전한다. */
     XBuffer_AddInt(xSendMsg,xSL.CDecapping_Sensor.CT_Detect_Sensor,COMMA);
-    XBuffer_AddInt(xSendMsg,xSL.CDecapping_Sensor.Z_H_Limit_Sensor,COMMA);
-    XBuffer_AddInt(xSendMsg,xSL.CDecapping_Sensor.Z_L_Limit_Sensor,COMMA);
-    XBuffer_AddInt(xSendMsg,xSL.CDecapping_Sensor.Y_F_Limit_Sensor,COMMA);
-    XBuffer_AddInt(xSendMsg,xSL.CDecapping_Sensor.Y_B_Limit_Sensor,COMMA);
+    XBuffer_AddInt(xSendMsg,!xSL.CDecapping_Sensor.Z_H_Limit_Sensor,COMMA);
+    XBuffer_AddInt(xSendMsg,!xSL.CDecapping_Sensor.Z_L_Limit_Sensor,COMMA);
+    XBuffer_AddInt(xSendMsg,!xSL.CDecapping_Sensor.Y_F_Limit_Sensor,COMMA);
+    XBuffer_AddInt(xSendMsg,!xSL.CDecapping_Sensor.Y_B_Limit_Sensor,COMMA);
     XBuffer_AddInt(xSendMsg,xSL.CDecapping_Sensor.CT_Cap_Grip_Detect_Open,COMMA);
     XBuffer_AddInt(xSendMsg,xSL.CDecapping_Sensor.CT_Cap_Grip_Detect_Close,COMMA);
     XBuffer_AddInt(xSendMsg,xSL.CDecapping_Sensor.CT_Body_Grip_Detect_Open,COMMA);

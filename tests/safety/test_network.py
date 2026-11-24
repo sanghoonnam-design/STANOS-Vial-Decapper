@@ -21,7 +21,7 @@ prefix = r"""
 #define U08 uint8_t
 #define NO 0
 #define BOOL bool
-#define UPCASE(c) toupper((unsigned char)(c))
+#define UPCASE(c) ( ( (c)>='a' && (c)<='z') ? (c)-('a'-'A') : (c) )  /* App/project.h와 같은 정의(인자 다중 평가 포함) */
 #define xprintf(...) ((void)0)
 #define COMM_TCP 1
 #define __5sec 500
@@ -64,6 +64,8 @@ int main(void){
  CHECK("new connection discards old tail",received==0);
  tsXParsedData p={0};
  CHECK("incomplete parser input rejected",xParser_ProcessReceivedData("HOME",&p,1)!=PARSER_ERR_SUCCESS);
+ CHECK("uppercase command name kept intact",xParser_ProcessReceivedData("VERSION\r\n",&p,1)==PARSER_ERR_SUCCESS && !strcmp(p.Command,"VERSION"));
+ CHECK("lowercase command name upcased",xParser_ProcessReceivedData("gsta\r\n",&p,1)==PARSER_ERR_SUCCESS && !strcmp(p.Command,"GSTA"));
  CHECK("repeated spaces accepted",xParser_ProcessReceivedData("MOVE  R   Z  123\r\n",&p,1)==PARSER_ERR_SUCCESS && p.ParamCount==3 && p.Params[2].value._int==123);
  CHECK("integer overflow rejected",xParser_ProcessReceivedData("MOVE R Z 2147483648\r\n",&p,1)!=PARSER_ERR_SUCCESS);
  CHECK("explicit positive integer accepted",xParser_ProcessReceivedData("MOVE A Z +123\r\n",&p,1)==PARSER_ERR_SUCCESS && p.Params[2].value._int==123);

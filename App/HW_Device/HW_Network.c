@@ -21,6 +21,7 @@
 #include "XDebug.h"
 
 #include "http_server_task.h"
+#include "CDecap.h" /* LR 사이클 완료 알림(CDecap_TakeLongRunReport) */
 
 #define S0 0
 #define S1 1
@@ -157,6 +158,17 @@ VOID TASK_Network(void *pvParameters)
     FOREVER
     {
         U32 startTick = ITIMER_StartMeasure_us();
+
+        /* LR 사이클 완료 알림 "LRCOUNT n": xMessageBuffer_TCP의 송신자는 이 태스크뿐이어야 하므로
+         * 제어 태스크가 기록한 횟수를 여기서 꺼내 보낸다. 앱 소켓이 연결되지 않았으면 버린다. */
+        U32 lrCount;
+        if (CDecap_TakeLongRunReport(&lrCount) &&
+            (_appSocket.state == ST_ACTIVE_CONNECTED || _appMonitorSocket.state == ST_ACTIVE_CONNECTED))
+        {
+            char lrMsg[32];
+            snprintf(lrMsg, sizeof(lrMsg), "LRCOUNT %lu\r\n", (unsigned long)lrCount);
+            TCP_Send(lrMsg);
+        }
 
         TcpServer_DualSocket_FSM(&_appSocket, TcpMsgBuf, xSystemInfo.network.portNum);
         TcpServer_DualSocket_FSM(&_appMonitorSocket, TcpMsgBuf, xSystemInfo.network.portNum + 1);

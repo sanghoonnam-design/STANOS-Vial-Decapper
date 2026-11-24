@@ -33,7 +33,9 @@ static teXParsingErrorCode xParser_ParseCommand(const char *buffer, tsXParsedDat
     int length = 0;
     while (*p && *p != ' ') {
         if (length >= MAX_CMD_LEN-1) return PARSER_ERR_INVALID_CMD;
-        data->Command[length++] = UPCASE(*p++);
+        /* UPCASE는 인자를 여러 번 평가하는 매크로(project.h)라 *p++를 직접 넘기면 p가 두 번 증가해 글자를 건너뛴다. */
+        char ch = *p++;
+        data->Command[length++] = UPCASE(ch);
     }
     data->Command[length] = '\0';
     if (!length) return PARSER_ERR_INVALID_CMD;

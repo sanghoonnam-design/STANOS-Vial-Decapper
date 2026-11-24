@@ -645,6 +645,8 @@ void CMD_Handle_DI(const tsXParsedData *parsedData, U08 useTCP)
  * 채널은 1 기준이다. 값은 양수면 HIGH, 나머지는 LOW로 해석한다.
  * 99는 I/O 초기화, 100은 호출마다 다음 출력 하나를 토글한다. 실행 전 디지털 루프백을 해제한다.
  * Decapper FSM을 거치지 않고 공압/그리퍼와 공유하는 실제 출력을 직접 변경하는 시험 명령이다.
+ * Decapper가 대기 상태가 아니면(동작·일시정지·유지보수 중) 출력과 SPI를 건드리지 않고 BUSY로 응답한다.
+ * 동작 중 밸브/그리퍼 반전과 10 ms 입력 갱신과의 SPI1 충돌을 막는다. 오류로 정지한 대기 상태에서는 허용한다.
  */
 void CMD_Handle_DO(const tsXParsedData *parsedData, U08 useTCP)
 {
@@ -652,6 +654,13 @@ void CMD_Handle_DO(const tsXParsedData *parsedData, U08 useTCP)
     char str[50] = {0};
     static U08 pin = 0;
     U08 val = 0;
+
+    /* 루프백 해제(IOEXP_WriteIOclear)보다 먼저 검사해야 BUSY 응답이 출력을 바꾸지 않는다. */
+    if (!CDecap_IsIdle())
+    {
+        XBuffer_AddString(xSendMsg, "BUSY", NO_COMMA);
+        return;
+    }
 
     if (xHwTest.isLoopbackEnable_Digital)
     {

@@ -35,6 +35,8 @@ typedef uint8_t U8,U08; typedef uint16_t U16; typedef uint32_t U32; typedef int3
 #define GPIO_PIN_SET 1
 #define READ_IN 0
 #define STEP_PULSE_RATE_R 122
+#define A_MAX_BASE 3725
+#define MAX_ACC 2047
 #define taskENTER_CRITICAL() ((void)0)
 #define taskEXIT_CRITICAL() ((void)0)
 #define pdTRUE 1
@@ -56,6 +58,8 @@ static void xSemaphoreGive(SemaphoreHandle_t mutex){
 '''
 tm=read('Drivers/BSP/STEP/TMC2660.h')
 prefix+=stripped(tm[:tm.index('/*\n#pragma pack(push,1)')])+'\n#endif\n'
+# mock TMC429 좌표를 앱 좌표로 쓰는 기존 기대값 유지: Z 부호 변환(Z_COORD_SIGN=-1)은 끈다(2026-11-20).
+prefix+='#define Z_COORD_SIGN (1)\n'
 prefix+=stripped(read('App/HW_Device/CDecap.h'))
 prefix+=stripped(read('App/System/XSystem_DB.h'))
 prefix+=stripped(read('App/Common/XErrorCode.h'))
@@ -98,9 +102,14 @@ U8 (*digitalRead)(U8,U8)=IOEXP_ReadIObit;
 void Drive_RelMove(sMotionCommand_t*p){lastMove=*p;moveCount++;}
 void Drive_AbsMove(sMotionCommand_t*p){lastMove=*p;moveCount++;}
 void Drive_Stop(sMotionCommand_t*p){stopCount++;}
-void TMC2660_SetHoldCurrent(U8 a){}
-U8 TMC429_VelMove(U8 a,U32 b,S32 d){return 0;}
-void TMC429_MotorStop(U8 a,U32 b){}
+/* 구동/유지 전류 전환과 HOME 속도 이동의 가속도·전류 상태를 기록한다 */
+static int runCurrentSets[2], holdCurrentSets[2], motorCurrentRun[2], homeMovesAtHold; static U32 lastHomeAcc;
+void TMC2660_SetHoldCurrent(U8 a){if(a<2){holdCurrentSets[a]++;motorCurrentRun[a]=0;}}
+void TMC2660_SetRunCurrent(U8 a){if(a<2){runCurrentSets[a]++;motorCurrentRun[a]=1;}}
+static int homeMoves, homeStops;
+static void homeVelNote(U8 a,U32 b){lastHomeAcc=b;if(a<2 && !motorCurrentRun[a])homeMovesAtHold++;}
+U8 TMC429_VelMove(U8 a,U32 b,S32 d){homeMoves++;homeVelNote(a,b);return 0;}
+void TMC429_MotorStop(U8 a,U32 b){homeStops++;lastHomeAcc=b;}
 '''
 code=prefix+stripped(c)
 for name in ['CMD_RejectIfDecapperBusy','CMD_ReplyInvalidArgument','CMD_QueueAction','CMD_Handle_STOP','CMD_Handle_PAUSE','CMD_Handle_RESUME','CMD_Handle_HOME']:
@@ -114,29 +123,34 @@ static void reset(void){
  memset(&xSL,0,sizeof xSL);memset(&xPL,0,sizeof xPL);memset(&xCD,0,sizeof xCD);
  xAT=ACTION_NONE;errorCode=0;gTriggerCount=0;
  useMotorFeedback=false;motorFeedbackReads=0;
+ homeMoves=homeStops=0;
+ memset(runCurrentSets,0,sizeof runCurrentSets);memset(holdCurrentSets,0,sizeof holdCurrentSets);
+ memset(motorCurrentRun,0,sizeof motorCurrentRun);homeMovesAtHold=0;lastHomeAcc=0;
+ xSL.CDecapping_Sensor.Z_H_Limit_Sensor=1;
+ xSL.CDecapping_Sensor.Z_L_Limit_Sensor=1;
  xPL.Decapper.Limit_PosZ=160000;xPL.Decapper.Limit_PosR=100000;
  xPL.Decapper.SoftLimitEnable=1;
- xPL.Decapper.SwNegLimit[0]=-160000;xPL.Decapper.SwPosLimit[0]=160000;
- xPL.Decapper.SwNegLimit[1]=-100000;xPL.Decapper.SwPosLimit[1]=100000;
+ xPL.Decapper.SwNegLimit[aZ]=-160000;xPL.Decapper.SwPosLimit[aZ]=160000;
+ xPL.Decapper.SwNegLimit[aR]=-100000;xPL.Decapper.SwPosLimit[aR]=100000;
  CDecap_Init();CDecap_StartTimeout();moveCount=stopCount=0;
 }
 int main(void){tsXParsedData cmd={0};
- reset();position[0]=150000; CDecap_ManualMotorMove(SUB_zRMOVE,aZ,true,20000);
+ reset();position[aZ]=150000; CDecap_ManualMotorMove(SUB_zRMOVE,aZ,true,20000);
  CHECK("relative endpoint outside limit never sent",moveCount==0);
- reset();xPL.Decapper.Limit_PosZ=10000;xCD.Decapper.Motor_TargetPos[0]=11000;CDecap_Absmove_Z();
+ reset();xPL.Decapper.Limit_PosZ=10000;xCD.Decapper.Motor_TargetPos[aZ]=11000;CDecap_Absmove_Z();
  CHECK("Z absolute uses configured limit",moveCount==0);
  reset();CDecap_ManualMotorMove(SUB_zRMOVE,aZ,true,500);
  CHECK("valid relative move unchanged",moveCount==1 && lastMove.Pos==500);
- reset();position[0]=159500;CDecap_ManualMotorMove(SUB_zRMOVE,aZ,true,500);
+ reset();position[aZ]=159500;CDecap_ManualMotorMove(SUB_zRMOVE,aZ,true,500);
  CHECK("exact positive boundary accepted",moveCount==1 && lastMove.Pos==500);
- reset();position[0]=-159500;CDecap_ManualMotorMove(SUB_zRMOVE,aZ,true,-500);
+ reset();position[aZ]=-159500;CDecap_ManualMotorMove(SUB_zRMOVE,aZ,true,-500);
  CHECK("exact negative boundary accepted",moveCount==1 && lastMove.Pos==-500);
- reset();position[0]=1000;CDecap_ManualMotorMove(SUB_zRMOVE,aZ,true,INT32_MAX);
+ reset();position[aZ]=1000;CDecap_ManualMotorMove(SUB_zRMOVE,aZ,true,INT32_MAX);
  CHECK("relative addition cannot wrap into valid range",moveCount==0);
- reset();xPL.Decapper.SwPosLimit[0]=5000;CDecap_ManualMotorMove(SUB_zAMOVE,aZ,false,6000);
+ reset();xPL.Decapper.SwPosLimit[aZ]=5000;CDecap_ManualMotorMove(SUB_zAMOVE,aZ,false,6000);
  CHECK("narrower software limit enforced",moveCount==0);
  reset();CHECK("invalid automatic target fails without motion",!CD_ABSMove(0,300000,20000,170000) && moveCount==0);
- reset();xPL.Decapper.SwPosLimit[0]=1000;position[0]=1001;xSL.xZ_Motor_Run.Motor_Run=1;sPhase=DFSM_AMOVEZ;
+ reset();xPL.Decapper.SwPosLimit[aZ]=1000;position[aZ]=1001;xSL.xZ_Motor_Run.Motor_Run=1;sPhase=DFSM_AMOVEZ;
  CDecap_Action_Statemachine(ACTION_NONE);
  CHECK("out of range moving axis stops",stopCount>=2 && xSL.isError);
  reset();xSL.isBusy=1;sPhase=DFSM_CAP;CMD_Handle_STOP(&cmd,0);CMD_Handle_RESUME(&cmd,0);CDecap_Action_Statemachine(xAT);
@@ -150,7 +164,7 @@ int main(void){tsXParsedData cmd={0};
  reset();gTriggerCount=501;CDecap_CheckTimeout(5000,"Test timeout");CMD_Handle_STOP(&cmd,0);CDecap_Action_Statemachine(xAT);
  CHECK("STOP remains available during fault",xAT==ACTION_NONE && xSL.isError);
  reset();xSL.Decapper.Z_HL_isError=1;CDecap_Action_Statemachine(ACTION_NONE);
- CHECK("deferred sensor interlock remains disabled",!xSL.isError);
+ CHECK("latched diagnostics alone do not trigger a motion fault",!xSL.isError);
  reset();position[aZ]=200;position[aR]=0;useMotorFeedback=true;
  motorFeedback[aZ]=1;motorFeedback[aR]=0;
  CDecap_Action_Statemachine(ACTION_NONE);
@@ -218,30 +232,31 @@ int main(void){tsXParsedData cmd={0};
  gTriggerCount+=MS_TO_TICKS(READY_TIMEOUT_MS);
  CDecap_Action_Statemachine(ACTION_NONE);CMD_Handle_GERD(&cmd,0);
  CHECK("manual Y reports the missing limit and observed bits",
-       xSL.errorCode==2861 && strstr(response,"Y Back limit not reached") && strstr(response,"F=0 B=1"));
+       xSL.errorCode==2861 && strstr(response,"Y Back limit not reached") && strstr(response,"F=1 B=0"));
  reset();sPhase=DFSM_HOME;HomingSeq.Step=CDECAP_HOMING_L_REACH_OFF;SET_STARTED(SUB_HOMEZ);
+ xSL.CDecapping_Sensor.Z_L_Limit_Sensor=0;
  gTriggerCount=MS_TO_TICKS(HOMING_TIMEOUT_MS);
  CDecap_Action_Statemachine(ACTION_NONE);CMD_Handle_GERD(&cmd,0);
  CHECK("HOME reports Z sensor release failure and observed bits",
-       xSL.errorCode==2851 && strstr(response,"Z home sensor did not release") && strstr(response,"H=0 L=0"));
+       xSL.errorCode==2851 && strstr(response,"Z home sensor did not release") && strstr(response,"H=0 L=1"));
  reset();sPhase=DFSM_HOME;HomingSeq.Step=CDECAP_HOMING_H_WAIT;SET_STARTED(SUB_HOMEZ);
  xSL.xZ_Motor_Run.Motor_Run=1;gTriggerCount=MS_TO_TICKS(HOMING_TIMEOUT_MS);
  CDecap_Action_Statemachine(ACTION_NONE);CMD_Handle_GERD(&cmd,0);
  CHECK("HOME motor stop timeout stays a motor error",
        xSL.errorCode==2800 && strstr(response,"Z stop not confirmed"));
- reset();sPhase=DFSM_AROTATE;xCD.Decapper.Motor_TargetPos[aR]=100001;
+ reset();sPhase=DFSM_AROTATE;xCD.Decapper.Motor_TargetPos[aR]=8388608;
  CDecap_Action_Statemachine(ACTION_NONE);CMD_Handle_GERD(&cmd,0);
  CHECK("invalid R target names the axis and rejected target",
-       xSL.errorCode==ERROR_CODE_DECAP_LIMIT && strstr(response,"R target 100001") &&
-       strstr(response,"[-100000,100000]"));
+       xSL.errorCode==ERROR_CODE_DECAP_LIMIT && strstr(response,"R target 8388608") &&
+       strstr(response,"[-8388607,8388607]"));
  reset();sPhase=DFSM_AMOVEZ;position[aZ]=160001;xSL.xZ_Motor_Run.Motor_Run=1;
  CDecap_Action_Statemachine(ACTION_NONE);CMD_Handle_GERD(&cmd,0);
  CHECK("limit error distinguishes observed Z position from requested target",
        xSL.errorCode==ERROR_CODE_DECAP_LIMIT && strstr(response,"Z position 160001"));
- reset();sPhase=DFSM_AROTATE;xPL.Decapper.Limit_PosR=0;
+ reset();sPhase=DFSM_AMOVEZ;xPL.Decapper.Limit_PosZ=0;
  CDecap_Action_Statemachine(ACTION_NONE);CMD_Handle_GERD(&cmd,0);
  CHECK("invalid configured limits are identified separately",
-       xSL.errorCode==ERROR_CODE_DECAP_LIMIT && strstr(response,"R limits invalid"));
+       xSL.errorCode==ERROR_CODE_DECAP_LIMIT && strstr(response,"Z limits invalid"));
  reset();position[aZ]=position[aR]=0;
  xSL.CDecapping_Sensor.CT_Detect_Sensor=1;
  CDecap_Action_Statemachine(ACTION_CAP);CDecap_Action_Statemachine(ACTION_NONE);
@@ -258,6 +273,198 @@ int main(void){tsXParsedData cmd={0};
  CHECK("paired timeout identifies which axis still has an incomplete move",
        xSL.errorCode==ERROR_CODE_DECAP_TIMEOUT && strstr(response,"R stop or target not confirmed") &&
        !strstr(response,"Z/R stop"));
+ /* Z 리미트는 원점 확정(isHomed) 뒤에만 검사한다. 확정 뒤에는 방향과 무관하게 한쪽만 감지돼도 정지한다. */
+ reset();xSL.isHomed=1;position[aZ]=-100;xCD.Decapper.Motor_TargetPos[aZ]=0;
+ xSL.CDecapping_Sensor.Z_H_Limit_Sensor=0;
+ CDecap_Action_Statemachine(ACTION_AMOVEZ);CMD_Handle_GERD(&cmd,0);
+ CHECK("homed: active High blocks positive absolute MOVE before launch",
+       moveCount==0 && stopCount==2 && errorCode==2890 && strstr(response,"MOVE A Z") && strstr(response,"H=1"));
+ reset();xSL.isHomed=1;position[aZ]=-100;xCD.Decapper.Motor_TargetPos[aZ]=-10;
+ xSL.CDecapping_Sensor.Z_L_Limit_Sensor=0;
+ CDecap_Action_Statemachine(ACTION_RMOVEZ);
+ CHECK("homed: active Low blocks negative relative MOVE before launch",
+       moveCount==0 && stopCount==2 && errorCode==2891);
+ reset();xSL.isHomed=1;position[aZ]=0;xCD.Decapper.Motor_TargetPos[aZ]=-100;
+ xSL.CDecapping_Sensor.Z_H_Limit_Sensor=0;
+ CDecap_Action_Statemachine(ACTION_AMOVEZ);
+ CHECK("homed: active High also blocks negative Z travel",moveCount==0 && stopCount==2 && errorCode==2890);
+ reset();xSL.isHomed=1;position[aZ]=-100;xCD.Decapper.Motor_TargetPos[aZ]=100;
+ xSL.CDecapping_Sensor.Z_L_Limit_Sensor=0;
+ CDecap_Action_Statemachine(ACTION_RMOVEZ);
+ CHECK("homed: active Low also blocks positive Z travel",moveCount==0 && stopCount==2 && errorCode==2891);
+ reset();position[aZ]=-100;xCD.Decapper.Motor_TargetPos[aZ]=0;
+ xSL.CDecapping_Sensor.Z_H_Limit_Sensor=0;
+ CDecap_Action_Statemachine(ACTION_AMOVEZ);
+ CDecap_Action_Statemachine(ACTION_NONE);
+ CHECK("before HOME an active High does not block a Z MOVE",moveCount==1 && !xSL.isError);
+ reset();position[aZ]=0;xCD.Decapper.Motor_TargetPos[aZ]=-100;
+ xSL.CDecapping_Sensor.Z_H_Limit_Sensor=xSL.CDecapping_Sensor.Z_L_Limit_Sensor=0;
+ CDecap_Action_Statemachine(ACTION_AMOVEZ);
+ CDecap_Action_Statemachine(ACTION_NONE);
+ CHECK("before HOME even both active Z sensors do not block a Z MOVE",moveCount==1 && !xSL.isError);
+ reset();position[aZ]=-100;xCD.Decapper.Motor_TargetPos[aZ]=0;
+ CDecap_Action_Statemachine(ACTION_AMOVEZ);
+ position[aZ]=-3;xSL.xZ_Motor_Run.Motor_Run=1;
+ xSL.CDecapping_Sensor.Z_H_Limit_Sensor=0;
+ CDecap_Action_Statemachine(ACTION_NONE);
+ CHECK("before HOME High during travel does not stop the move",
+       moveCount==1 && stopCount==0 && !xSL.isError);
+ reset();xSL.isHomed=1;position[aZ]=-100;xCD.Decapper.Motor_TargetPos[aZ]=0;
+ CDecap_Action_Statemachine(ACTION_AMOVEZ);
+ position[aZ]=-3;xSL.xZ_Motor_Run.Motor_Run=1;
+ xSL.CDecapping_Sensor.Z_H_Limit_Sensor=0;
+ CDecap_Action_Statemachine(ACTION_NONE);
+ CHECK("homed: High during travel stops both axes before Z reaches zero",
+       moveCount==1 && stopCount==2 && errorCode==2890 && CDecap_GetOperationResult()==4);
+ CDecap_Action_Statemachine(ACTION_NONE);
+ CHECK("latched Z limit fault does not reissue motion",moveCount==1 && stopCount==2);
+ reset();xSL.isHomed=1;position[aZ]=0;xCD.Decapper.Motor_TargetPos[aZ]=-100;
+ CDecap_Action_Statemachine(ACTION_RMOVEZ);
+ xSL.CDecapping_Sensor.Z_L_Limit_Sensor=0;
+ CDecap_Action_Statemachine(ACTION_NONE);
+ CHECK("homed: Low trips a pending negative MOVE even before Run is asserted",
+       moveCount==1 && stopCount==2 && errorCode==2891);
+ reset();xSL.isHomed=1;position[aZ]=-100;xCD.Decapper.Motor_TargetPos[aZ]=100;
+ CDecap_Action_Statemachine(ACTION_RMOVEZ);
+ position[aZ]=-50;xSL.xZ_Motor_Run.Motor_Run=1;
+ xSL.CDecapping_Sensor.Z_L_Limit_Sensor=0;
+ CDecap_Action_Statemachine(ACTION_NONE);
+ CHECK("homed: Low during positive travel also stops the move",
+       moveCount==1 && stopCount==2 && errorCode==2891);
+ reset();xSL.isHomed=1;position[aZ]=0;xCD.Decapper.Motor_TargetPos[aZ]=-100;
+ xSL.CDecapping_Sensor.Z_H_Limit_Sensor=xSL.CDecapping_Sensor.Z_L_Limit_Sensor=0;
+ CDecap_Action_Statemachine(ACTION_AMOVEZ);CMD_Handle_GERD(&cmd,0);
+ CHECK("homed: both active Z sensors block Z travel in either direction",
+       moveCount==0 && stopCount==2 && errorCode==2892 && strstr(response,"H=1 L=1"));
+ reset();xSL.isHomed=1;position[aZ]=-100;position[aR]=0;
+ sPhase=DFSM_LONGRUN;xCD.Decapper.phaseDecapCap=LONGRUN_DECAP;
+ xPL.Decapper.ZCap_UpPos=0;xPL.Decapper.RDecapPos=3200;
+ CDecapping_Step=CDecapping_sData_Decapping;gTriggerCount=MS_TO_TICKS(CAP_GRIP_WAIT_MS);
+ xSL.CDecapping_Sensor.Z_H_Limit_Sensor=0;
+ CDecap_Action_Statemachine(ACTION_NONE);CMD_Handle_GERD(&cmd,0);
+ CHECK("paired LR checks the Z physical limit before commanding R",
+       moveCount==0 && stopCount==2 && errorCode==2890 && strstr(response,"LR/DECAP"));
+ reset();xSL.isHomed=1;position[aZ]=-100;
+ PauseContext.isPaused=true;PauseContext.resumeZ=true;PauseContext.resumeR=true;
+ PauseContext.zTargetPos=0;PauseContext.rTargetPos=3200;PauseContext.savedPhase=DFSM_CAP;
+ sPhase=DFSM_PAUSE;
+ xSL.CDecapping_Sensor.Z_H_Limit_Sensor=0;
+ CDecap_Action_Statemachine(ACTION_RESUME);
+ CHECK("RESUME checks the Z physical limit before restarting either axis",
+       moveCount==0 && stopCount==2 && errorCode==2890);
+ reset();sPhase=DFSM_HOME;HomingSeq.Step=CDECAP_HOMING_H_SEARCH;SET_STARTED(SUB_HOMEZ);
+ HomingSeq.H_Acc=HomingSeq.L_Acc=CDecap_ToDriverAcc(MOTOR_ACC); /* HOME 시작 시 설정되는 값 */
+ xSL.CDecapping_Sensor.Z_L_Limit_Sensor=0;
+ CDecap_Action_Statemachine(ACTION_NONE);
+ CHECK("HOME at an already active HOME(L) sensor advances without driving into it",
+       homeMoves==0 && homeStops==1 && HomingSeq.Step==CDECAP_HOMING_H_WAIT && !xSL.isError);
+ CDecap_Action_Statemachine(ACTION_NONE);
+ CDecap_Action_Statemachine(ACTION_NONE);
+ CHECK("HOME still backs off an active HOME(L) sensor",
+       homeMoves==1 && HomingSeq.Step==CDECAP_HOMING_L_REACH_OFF && !xSL.isError);
+ CHECK("HOME backoff runs at run current with an in-range TMC429 acceleration",
+       homeMovesAtHold==0 && runCurrentSets[aZ]==1 && lastHomeAcc==80);
+ CHECK("acceleration conversion matches Drive_AbsMove and clamps",
+       CDecap_ToDriverAcc(300000)==80 && CDecap_ToDriverAcc(800000)==214 &&
+       CDecap_ToDriverAcc(0)==1 && CDecap_ToDriverAcc(0xFFFFFFFFu)==MAX_ACC);
+ xSL.CDecapping_Sensor.Z_L_Limit_Sensor=1;
+ xSL.CDecapping_Sensor.Z_H_Limit_Sensor=0;
+ CDecap_Action_Statemachine(ACTION_NONE);
+ CHECK("H(Z+) during HOME backoff is not a fault (limits are unchecked until homed)",!xSL.isError && errorCode==0);
+ /* HOME: High 감지 위치에서 Z_HOME_OFFSET_PULSE 물러난 곳이 0점이다 */
+ reset();sPhase=DFSM_HOME;HomingSeq.Step=CDECAP_HOMING_Z_DONE;SET_STARTED(SUB_HOMEZ);
+ position[aZ]=-4321;xSL.CDecapping_Sensor.Z_L_Limit_Sensor=0;
+ CDecap_Action_Statemachine(ACTION_NONE);
+ CHECK("HOME labels the HOME(L) detection point +offset without moving yet",
+       position[aZ]==Z_HOME_OFFSET_PULSE && moveCount==0 && HomingSeq.Step==CDECAP_HOMING_OFFSET_MOVE &&
+       !xSL.isHomed && !xSL.isError);
+ CDecap_Action_Statemachine(ACTION_NONE);
+ CHECK("HOME then backs off to Z=0 at the slow HOME speed and run current",
+       moveCount==1 && lastMove.Axis==aZ && lastMove.Pos==0 && lastMove.Vel==MOTOR_SPD_HOME_SLOW &&
+       lastMove.Acc==MOTOR_ACC && HomingSeq.Step==CDECAP_HOMING_OFFSET_WAIT && holdCurrentSets[aZ]==0 && !xSL.isError);
+ position[aZ]=400;xSL.xZ_Motor_Run.Motor_Run=1;
+ CDecap_Action_Statemachine(ACTION_NONE);
+ CHECK("HOME waits while the offset move is running",
+       HomingSeq.Step==CDECAP_HOMING_OFFSET_WAIT && holdCurrentSets[aZ]==0 && !xSL.isHomed && !xSL.isError);
+ position[aZ]=0;xSL.xZ_Motor_Run.Motor_Run=0;xSL.CDecapping_Sensor.Z_L_Limit_Sensor=1;
+ CDecap_Action_Statemachine(ACTION_NONE);
+ CHECK("HOME accepts Z=0 once stopped with the HOME(L) sensor released, then drops Z to hold current",
+       HomingSeq.Step==CDECAP_HOMING_Y_HOME && holdCurrentSets[aZ]==1 && position[aZ]==0 && moveCount==1 && !xSL.isError);
+ reset();sPhase=DFSM_HOME;HomingSeq.Step=CDECAP_HOMING_OFFSET_WAIT;SET_STARTED(SUB_HOMEZ);
+ sMovePending[aZ]=true;sMoveTarget[aZ]=0;position[aZ]=0;xSL.CDecapping_Sensor.Z_L_Limit_Sensor=0;
+ CDecap_Action_Statemachine(ACTION_NONE);CMD_Handle_GERD(&cmd,0);
+ CHECK("HOME faults when the HOME(L) sensor is still active at the offset position",
+       xSL.errorCode==2851 && strstr(response,"HOME step=17") && strstr(response,"still active after home offset") &&
+       strstr(response,"H=0 L=1 expected L=0") && !xSL.isHomed && stopCount==2);
+ reset();sPhase=DFSM_HOME;HomingSeq.Step=CDECAP_HOMING_OFFSET_WAIT;SET_STARTED(SUB_HOMEZ);
+ sMovePending[aZ]=true;sMoveTarget[aZ]=0;position[aZ]=500;xSL.xZ_Motor_Run.Motor_Run=1;
+ xSL.CDecapping_Sensor.Z_H_Limit_Sensor=0;
+ CDecap_Action_Statemachine(ACTION_NONE);
+ CHECK("H(Z+) during the HOME offset move is not a fault (limits are unchecked until homed)",
+       !xSL.isError && errorCode==0 && HomingSeq.Step==CDECAP_HOMING_OFFSET_WAIT && !xSL.isHomed);
+ reset();sPhase=DFSM_HOME;HomingSeq.Step=CDECAP_HOMING_OFFSET_WAIT;SET_STARTED(SUB_HOMEZ);
+ sMovePending[aZ]=true;sMoveTarget[aZ]=0;position[aZ]=500;xSL.xZ_Motor_Run.Motor_Run=1;
+ gTriggerCount=MS_TO_TICKS(HOMING_TIMEOUT_MS);
+ CDecap_Action_Statemachine(ACTION_NONE);CMD_Handle_GERD(&cmd,0);
+ CHECK("HOME offset move that never finishes is a motor timeout",
+       xSL.errorCode==2800 && strstr(response,"after home offset") && !xSL.isHomed);
+ /* 0점이 센서 아래에 있으므로 HOME 뒤의 + 이동에서 High가 켜지면 위치와 무관하게 E2890이다(예전 0점 근처 예외 없음) */
+ reset();xSL.isHomed=1;position[aZ]=-50000;xCD.Decapper.Motor_TargetPos[aZ]=0;
+ CDecap_Action_Statemachine(ACTION_AMOVEZ);
+ position[aZ]=-30;xSL.xZ_Motor_Run.Motor_Run=1;xSL.CDecapping_Sensor.Z_L_Limit_Sensor=0;
+ CDecap_Action_Statemachine(ACTION_NONE);
+ CHECK("homed return to Z=0 stops on the HOME(L) sensor even just below zero",
+       moveCount==1 && stopCount==2 && errorCode==2891);
+ reset();xSL.isHomed=1;position[aZ]=-50000;xCD.Decapper.Motor_TargetPos[aZ]=0;
+ CDecap_Action_Statemachine(ACTION_AMOVEZ);
+ position[aZ]=0;xSL.xZ_Motor_Run.Motor_Run=0;gTriggerCount=SEC_TO_TICKS(1)+1;
+ CDecap_Action_Statemachine(ACTION_NONE);CDecap_Action_Statemachine(ACTION_NONE);
+ CDecap_Action_Statemachine(ACTION_NONE);
+ CHECK("homed return to Z=0 completes with the HOME(L) sensor released",
+       !xSL.isError && CDecap_GetPhase()==DFSM_IDLE && CDecap_GetOperationResult()==2);
+ reset();xSL.isHomed=1;position[aZ]=-50000;
+ CDecap_Action_Statemachine(ACTION_ORIGIN);
+ position[aZ]=-Z_HOME_OFFSET_PULSE/2;xSL.xZ_Motor_Run.Motor_Run=1;xSL.CDecapping_Sensor.Z_L_Limit_Sensor=0;
+ CDecap_Action_Statemachine(ACTION_NONE);
+ CHECK("ORG return to Z=0 stops on the HOME(L) sensor",
+       moveCount==1 && stopCount==2 && errorCode==2891);
+ reset();xSL.isHomed=1;position[aZ]=0;xCD.Decapper.Motor_TargetPos[aZ]=100;
+ xSL.CDecapping_Sensor.Z_L_Limit_Sensor=0;
+ CDecap_Action_Statemachine(ACTION_AMOVEZ);
+ CHECK("homed target beyond the home reference is blocked by the HOME(L) sensor",
+       moveCount==0 && stopCount==2 && errorCode==2891);
+ /* 유지 전류 전환: 정지 명령 직후가 아니라 정지를 확인한 뒤에만 내린다 */
+ reset();useMotorFeedback=true;motorFeedback[aZ]=motorFeedback[aR]=1;
+ TMC2660_SetRunCurrent(aZ);TMC2660_SetRunCurrent(aR);
+ sPhase=DFSM_LONGRUN;xSL.isBusy=YES;CDecap_RequestStop();CDecap_Action_Statemachine(xAT);
+ CHECK("STOP sends the stop commands without dropping to hold current",
+       stopCount==2 && motorCurrentRun[aZ] && motorCurrentRun[aR] && sPhase==DFSM_IDLE);
+ CDecap_Action_Statemachine(xAT);
+ CHECK("run current is kept while both axes are still decelerating",motorCurrentRun[aZ] && motorCurrentRun[aR]);
+ motorFeedback[aZ]=0;CDecap_Action_Statemachine(xAT);
+ CHECK("only the axis that has stopped drops to hold current",!motorCurrentRun[aZ] && motorCurrentRun[aR]);
+ motorFeedback[aR]=0;CDecap_Action_Statemachine(xAT);
+ CHECK("the other axis drops to hold current once it stops",!motorCurrentRun[aR]);
+ reset();useMotorFeedback=true;TMC2660_SetRunCurrent(aZ);TMC2660_SetRunCurrent(aR);
+ sPhase=DFSM_END_OK;xSL.isBusy=YES;CDecap_Action_Statemachine(ACTION_NONE);
+ CDecap_Action_Statemachine(ACTION_NONE);
+ CHECK("idle after a normally completed operation returns both axes to hold current",
+       sPhase==DFSM_IDLE && !motorCurrentRun[aZ] && !motorCurrentRun[aR] && !xSL.isError);
+ reset();useMotorFeedback=true;TMC2660_SetRunCurrent(aZ);xSL.isHomed=1;
+ sPhase=DFSM_CAP;xSL.isBusy=YES;CDecapping_Step=CDecapping_Cap_UpWait;previousTime[SUB_CAPPING]=gTriggerCount;
+ CDecap_Action_Statemachine(ACTION_NONE);
+ CHECK("a dwell inside a running sequence keeps the run current",
+       motorCurrentRun[aZ] && sPhase==DFSM_CAP && !xSL.isError);
+ motorFeedback[aZ]=1;CDecap_Action_Statemachine(ACTION_PAUSE);CDecap_Action_Statemachine(ACTION_NONE);
+ CHECK("PAUSE keeps the run current while the axis is still moving",CDecap_IsPaused() && motorCurrentRun[aZ]);
+ motorFeedback[aZ]=0;CDecap_Action_Statemachine(ACTION_NONE);
+ CHECK("a paused, stopped axis drops to hold current",CDecap_IsPaused() && !motorCurrentRun[aZ]);
+ reset();useMotorFeedback=true;motorFeedback[aZ]=1;TMC2660_SetRunCurrent(aZ);
+ sPhase=DFSM_CAP;xSL.isBusy=YES;CDecap_Fault(ERROR_CODE_DECAP_TIMEOUT,"current test");
+ CDecap_Action_Statemachine(ACTION_NONE);
+ CHECK("a fault stop keeps the run current until the axis stops",xSL.isError && motorCurrentRun[aZ]);
+ motorFeedback[aZ]=0;CDecap_Action_Statemachine(ACTION_NONE);
+ CHECK("a stopped axis in the fault state drops to hold current",xSL.isError && !motorCurrentRun[aZ]);
  return failures?1:0;
 }
 '''

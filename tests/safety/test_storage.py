@@ -108,7 +108,7 @@ int main(void){
        readLatest(&latest) && !memcmp(&latest,&expected,sizeof(latest)));
  writes=0;
  CHECK("limits of the stored configuration are enforced before writes",
-       !EEPROMPL_SaveDecapperTarget(aR,100001) && writes==0);
+       !EEPROMPL_SaveDecapperTarget(aR,8388608) && writes==0);
 
  seed(&initial);
  tsEEPROM_Config torn=initial;

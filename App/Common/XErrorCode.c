@@ -31,7 +31,12 @@ const tsErrorEntry gErrorTable[] =
         {ERROR_CODE_DECAP_Y_FORWARD_NOT_REACHED, _CRITICAL, "Y Forward limit not reached."},
         {ERROR_CODE_DECAP_Y_BACK_NOT_REACHED, _CRITICAL, "Y Back limit not reached."},
         {ERROR_CODE_DECAP_CAP_OPEN_NOT_CONFIRMED, _CRITICAL, "Cap open sensor not confirmed."},
+        {ERROR_CODE_DECAP_CAP_GRIP_SENSOR_FAULT, _CRITICAL, "Cap grip sensors both active."},
         {ERROR_CODE_DECAP_BODY_HOLD_NOT_CONFIRMED, _CRITICAL, "Body hold sensors not confirmed."},
+        {ERROR_CODE_DECAP_BODY_GRIP_SENSOR_FAULT, _CRITICAL, "Body grip sensors both active."},
+        {ERROR_CODE_DECAP_Z_HIGH_LIMIT, _CRITICAL, "Z travel blocked by High limit."},
+        {ERROR_CODE_DECAP_Z_LOW_LIMIT, _CRITICAL, "Z travel blocked by Low limit."},
+        {ERROR_CODE_DECAP_Z_LIMIT_CONFLICT, _CRITICAL, "Z High and Low limits both active."},
 
         {(teErrorCode)9999, (teErrorSeverity)0, 0}};
 

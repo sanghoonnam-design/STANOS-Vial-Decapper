@@ -18,7 +18,7 @@ bool gZCapUpPosSavePending; S32 gZCapUpPosPendingValue;
 code+=ns["stripped"](ns["read"]("App/Task/_10_XCommand_Module.h"))
 for name in ["GetParamInt","GetParamFloat","RPL_SetParameter","API_NoArgs","API_AddParamFloat"]:
     code+=ns["function"](ns["module"].replace("__attribute__((unused)) ", ""),name)
-for name in ["CMD_Handle_GPOS","CMD_Handle_TEACH","CMD_Handle_PGET","CMD_Handle_PCONFIG","CMD_Handle_GSTATE","CMD_Handle_GSENSOR","CMD_Handle_GLR","CMD_Handle_LongRun"]:
+for name in ["CMD_Handle_GPOS","CMD_Handle_TEACH","CMD_Handle_PGET","CMD_Handle_PCONFIG","CMD_Handle_GSTATE","CMD_Handle_GSENSOR","CMD_Handle_GLR","CMD_Handle_LongRun","CMD_Handle_DECAP","CMD_Handle_CAP","CMD_Handle_UDECAP","CMD_Handle_UCAP"]:
     code+=ns["function"](ns["module"],name) or ('void '+name+'(const tsXParsedData*p,U08 c){strcpy(response,"MISSING");}\n')
 if "U32 CDecap_GetLongRunLimit(void)" not in ns["c"]:
     code+='U32 CDecap_GetLongRunLimit(void){return 0;}\n'
@@ -38,7 +38,7 @@ parser=ns["read"]("App/Common/XParser.c").split("void xParser_HandleError(")[0]
 code+=r"""#include <ctype.h>
 #include <errno.h>
 #include <limits.h>
-#define UPCASE(c) toupper((unsigned char)(c))
+#define UPCASE(c) ( ( (c)>='a' && (c)<='z') ? (c)-('a'-'A') : (c) )  /* App/project.h와 같은 정의(인자 다중 평가 포함) */
 static void xParser_PrintParsedData(const tsXParsedData *p){}
 """
 code+=ns["stripped"](parser)
@@ -160,7 +160,28 @@ int main(void){
  CHECK("unsupported writes release maintenance and preserve teaching candidates",
        !CDecap_IsMaintenanceActive() && gZCapUpPosSavePending && gRDecapPosSavePending);
  ClearError();
- p=args(1,3,0);response[0]=0;CMD_Handle_LongRun(&p,0);
+ xSL.isHomed=false;p=args(1,3,0);response[0]=0;CMD_Handle_LongRun(&p,0);
+ CHECK("LR before HOME is refused with FAIL and registers nothing",
+       !strcmp(response,"FAIL") && xAT==ACTION_NONE && CDecap_GetOperationId()==0 && CDecap_GetLongRunLimit()==0);
+ CHECK("LR request API also refuses an unhomed axis",!CDecap_TryLongRun(5) && xAT==ACTION_NONE && CDecap_GetLongRunLimit()==0);
+ {
+  void (*handlers[])(const tsXParsedData*,U08)={CMD_Handle_DECAP,CMD_Handle_CAP,CMD_Handle_UDECAP,CMD_Handle_UCAP};
+  const teXActionType actions[]={ACTION_DECAP,ACTION_CAP,ACTION_UDECAP,ACTION_UCAP};
+  bool refused=true;
+  for(int i=0;i<4;i++){
+   tsXParsedData none={0};response[0]=0;handlers[i](&none,0);
+   refused &= !strcmp(response,"FAIL") && xAT==ACTION_NONE && CDecap_GetOperationId()==0 &&
+              !CDecap_TryRequestAction(actions[i]) && xAT==ACTION_NONE;
+  }
+  CHECK("DECAP/CAP/UDECAP/UCAP before HOME are refused with FAIL and register nothing",refused);
+  CHECK("HOME itself and non-sequence actions stay available before HOME",
+        !CDecap_ActionNeedsHome(ACTION_HOME) && !CDecap_ActionNeedsHome(ACTION_ORIGIN) && CDecap_ActionNeedsHome(ACTION_LONGRUN));
+  xSL.isHomed=true;tsXParsedData none={0};response[0]=0;CMD_Handle_UDECAP(&none,0);
+  CHECK("UDECAP after HOME is accepted",!strcmp(response,"udecap") && xAT==ACTION_UDECAP && CDecap_GetOperationId()==1);
+  xAT=ACTION_NONE;sOperationId=0;
+ }
+ xSL.isHomed=false;
+ xSL.isHomed=true;p=args(1,3,0);response[0]=0;CMD_Handle_LongRun(&p,0);
  CHECK("finite LR request registers limit",CDecap_GetLongRunLimit()==3 && xAT==ACTION_LONGRUN);
  CHECK("accepted operation has an identity before FSM tick",CDecap_GetOperationId()==1 && CDecap_GetOperationResult()==1);
  return failures?1:0;

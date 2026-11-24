@@ -34,16 +34,21 @@
 #define R_MOTOR_POS				20000
 
 #define ZDECAP_ACC				300000
-#define ZDECAP_VEL				20000
+#define ZDECAP_VEL				10000
 
 //TEST 하여 수정
-#define ZCAP_CAP_UP_POS				MM2PULSE_R * 2
-#define ZCAP_CAP_SIDE_POS			MM2PULSE_R * 2
+/* 2026-11-20: Z 좌표는 아래로 갈수록 +(Z_COORD_SIGN 참고). 기존 -12000/-24000과 같은 실제 위치다. */
+#define ZCAP_CAP_UP_POS				14000
+#define ZCAP_CAP_SIDE_POS			28000
 #define ZCAP_ORIGIN_POSITION	0
 
 #define RDECAP_ACC				300000
-#define RDECAP_VEL				20000
-#define RDECAP_POS				MM2PULSE_R * 2
+#define RDECAP_VEL				100000
+/* 2026-11-20: 4바퀴(921600) 기준 이동 약 9.9초, 모터 약 900 rpm(1바퀴 230400) */
+/* 2026-11-20 실측(사용자): R 출력축 1바퀴 = 230400 pulse(6400 × 36, 32 마이크로스텝 기준).
+ * MM2PULSE_R(115200)은 16 마이크로스텝 가정이라 1바퀴 값으로 쓰지 않는다. */
+#define R_PULSE_PER_REV			(230400)
+#define RDECAP_POS				(R_PULSE_PER_REV * 5) /* CAP Up↔Side 동안 5바퀴 = 1152000 (공장 기본값, 실기 값은 PL 57) */
 
 #define MOTOR_SPD_HOME_FAST (20000) // 모터 속도 빠르게
 #define MOTOR_SPD_HOME_SLOW (3000)  // 모터 속도 느리게
@@ -61,14 +66,14 @@
 #define PK235	1
 
 #define MM2PULSE_Z (3200 * PK235) //1mm 기준
-#define MM2PULSE_R (3200 * PKP223) //1mm 기준
+#define MM2PULSE_R (6400 * PKP223) //1mm 기준
 
 //티칭 포인트==============================================================================
 #define CDECAPPOS_Z_CAP_TOP 5 //ex 32
-#define CDECAPPOS_Z_MOVE_TOP	MM2PULSE * CDECAPPOS_Z_CAP_TOP
+#define CDECAPPOS_Z_MOVE_TOP	ZCAP_CAP_UP_POS
 
 #define CDECAPPOS_Z_CAP_SIDE 5 //ex 32
-#define CDECAPPOS_Z_MOVE_SIDE 	MM2PULSE * CDECAPPOS_Z_CAP_SIDE
+#define CDECAPPOS_Z_MOVE_SIDE 	ZCAP_CAP_SIDE_POS
 
 //==============================================================================
 
@@ -78,12 +83,24 @@
 #define FRONT (-1)
 #define BACK (1)
 
-#define ZH (2)  // Z+: 모터 반대편
-#define ZL (3)  // Z-: 모터 있는 쪽
+#define ZH (2)  // (미사용, 옛 표기) Z 센서 핀은 Z_H_SENSOR_PIN(Z+ 아래)/Z_L_SENSOR_PIN(Z− 위) 참고
+#define ZL (3)  // (미사용, 옛 표기)
 
 //Master
-#define aZ (0) // Z축 모터 채널
-#define aR (1) // Rotate
+/* 모터 채널(TMC429/TMC2660 ch 번호). 2026-11-19 실기 배선 확인(사용자): ch0 = Rotate, ch1 = Z.
+ * 축별 배열 파라미터(SelMaxCur/RunCur/StopCurRate/SwNegLimit/SwPosLimit)도 이 번호를 첨자로 쓰므로,
+ * 이 값을 바꾸기 전에 EEPROM에 저장된 두 축 값은 서로 뒤바뀌어 읽힌다(HOME 전에 PL로 확인). */
+#define aZ (1) // Z축 모터 채널
+#define aR (0) // Rotate
+
+/* Z 좌표 방향(2026-11-20 사용자 요청): 다른 과제·IO 리스트(Z− = 2번 위쪽 HOME 센서, Z+ = 1번 아래쪽)와 맞춰
+ * HOME은 − 방향(위)으로 탐색하고, 작업 좌표(PL 52/53/54·GPOS·RPOS·MOVE)는 아래로 갈수록 + 이다.
+ * TMC429의 방향 반전(IF_CONFIG inv_dir)은 세 채널 공통이라 R 회전까지 바뀌므로, Z만 펌웨어에서 부호를 바꾼다.
+ * 앱 좌표 = Z_COORD_SIGN × TMC429 좌표. 실제 모터 움직임(배선·드라이버 방향)은 바뀌지 않는다.
+ * tests/safety 는 mock 좌표를 앱 좌표로 쓰므로 test_motion.py 가 (1)로 덮어쓴다. */
+#ifndef Z_COORD_SIGN
+#define Z_COORD_SIGN (-1)
+#endif
 
 #define DECAPPING (1)
 #define CAPPING (2)
@@ -99,8 +116,22 @@
 
 /* 공압 대기 시간. 단위는 ms이며 실제 제어 주기(10ms) 단위로 올림한다. */
 #define BODY_GRIP_WAIT_MS        (1000U)
+/* 자동 DECAP/CAP/LR에서 Y Back 센서가 감지된 뒤 Body를 잡기 전까지 기다리는 시간(ms). 2026-11-19 사용자 요청. */
+#define Y_BACK_SETTLE_MS         (1000U)
 #define CAP_GRIP_WAIT_MS         (1000U)
 #define CAP_UNGRIP_WAIT_MS       (1000U)
+/* HOME 시작 시 Cap·Body 해제 출력 후 Z를 움직이기 전까지 기다리는 시간(ms). 2026-11-20 사용자 요청. */
+#define HOME_GRIP_RELEASE_WAIT_MS (1500U)
+/* CAP에서 Z가 Up 위치에 도착한 뒤 R 회전·Z 하강을 시작하기 전 멈추는 시간(ms). */
+#define CAP_UP_DWELL_MS          (1000U)
+/* LR에서 DECAP 완료 후 CAP 시작 전, CAP 완료 후 다음 DECAP 시작 전 쉬는 시간(ms). */
+#define LR_INTERVAL_MS           (5000U) /* 2026-11-20 사용자 요청: 1초 → 5초(Forward에 내려놓자마자 다시 가져가지 않게) */
+/* LR 각 절반(DECAP/CAP) 시작 시 CT(바이알)가 감지될 때까지 기다리는 최대 시간(ms). 2026-11-20 사용자 요청.
+ * Y Forward 센서는 실린더 끝 직전에 켜질 수 있어 바이알이 CT 앞에 자리 잡기 전에 읽히는 경우가 있었다.
+ * 감지되면 바로 진행하고, 이 시간 동안 끝내 미감지면 E2820으로 정지한다(대기 중 모터·공압 출력 변화 없음). */
+#define CT_DETECT_WAIT_MS        (3000U)
+/* 그리퍼 Open/Close가 동시에 감지(11)된 상태가 이 시간 이상 이어지면 대기 중에도 E2871/E2881로 오류 정지한다(순간 노이즈 무시). */
+#define GRIP_SENSOR_FAULT_MS     (50U)
 /* 최소 대기 후 센서 완료를 추가로 기다리는 제한 시간이다. */
 #define GRIP_SENSOR_TIMEOUT_MS   (5000U)
 
@@ -108,6 +139,13 @@
 #define CAPPING_TIMEOUT_MS		(5000U)
 #define DECAPPING_TIMEOUT_MS	(5000U)
 #define READY_TIMEOUT_MS   		(5000U)
+
+/* HOME 0점은 High(위, Z−) 센서 감지 위치에서 이 거리만큼 아래(+방향)로 물러난 곳이다(센서 위치 = −Z_HOME_OFFSET_PULSE). 평소 Z=0 복귀 때 리미트 센서를 치지 않게 한다.
+ * 1000 pulse = 약 0.31 mm(3200 pulse/mm 기준). HOME은 이 위치에서 High가 해제(1)됐는지 확인하므로,
+ * 센서 히스테리시스가 더 크면 E2851이 난다 → 그때는 이 값을 키운다. 값을 바꾸면 Z 티칭 좌표가 그만큼 밀린다. */
+#define Z_HOME_OFFSET_PULSE     (1000)
+/* HOME 저속 후퇴·재접근의 최대 이동 거리(센서 히스테리시스 여유). 허용 시간 계산에만 쓴다. */
+#define Z_HOME_BACKOFF_MAX_PULSE (MM2PULSE_Z * 2)
 
 
 #define IS_STARTED(idx) (sStartedFlags & (1UL << (idx)))
@@ -119,25 +157,41 @@
 #define CLR_DONE(idx) (sDoneFlags &= ~(1UL << (idx)))
 
 /*Sensor Parameter*/
-#define Z_H_SENSOR_PIN                 (0U)
-#define Z_L_SENSOR_PIN                 (1U)
-#define Y_F_SENSOR_PIN                 (2U)
-#define Y_B_SENSOR_PIN                 (3U)
-#define CT_CAP_GRIP_OPEN_SENSOR_PIN    (4U)
+/* STANOS 과제 배선: 바이알 감지가 0번으로 오고 나머지는 한 칸씩 밀린다(일반 Decapper는 Z High=0 ... 바이알 감지=8).
+ * 2026-11-19 사용자 요청: HOME 중 Z High/Low가 뒤바뀐 것으로 보여 두 핀을 교환(기존 High=1, Low=2).
+ * 2026-11-20 사용자 요청: 그리퍼 OFF 시 Close가 1로 읽혀 Cap·Body의 Open/Close 핀을 교환(기존 Cap 5/6, Body 7/8).
+ * 2026-11-20 사용자 요청: Z 핀을 IO 리스트대로 둔다. H = Z+ = 1번(아래쪽), L = Z− = 2번(위쪽, HOME 센서).
+ *   HOME은 위(− 방향)로 가며 L(Z−) 센서를 찾는다(CDecap_Homing). 실제 배선·동작은 이전(위쪽 2번을 HOME)과 같다. */
+#define CT_DETECT_OPEN_SENSOR_PIN      (0U)
+#define Z_H_SENSOR_PIN                 (1U)   /* Z+ : 아래쪽 리미트 */
+#define Z_L_SENSOR_PIN                 (2U)   /* Z− : 위쪽 리미트 = HOME 센서 */
+#define Y_F_SENSOR_PIN                 (3U)
+#define Y_B_SENSOR_PIN                 (4U)
+#define CT_CAP_GRIP_OPEN_SENSOR_PIN    (6U)
 #define CT_CAP_GRIP_CLOSE_SENSOR_PIN   (5U)
-#define CT_BODY_GRIP_OPEN_SENSOR_PIN   (6U)
+#define CT_BODY_GRIP_OPEN_SENSOR_PIN   (8U)
 #define CT_BODY_GRIP_CLOSE_SENSOR_PIN  (7U)
-#define CT_DETECT_OPEN_SENSOR_PIN      (8U)
+
+/* 센서 감지 레벨: IO 확장칩 raw 입력이 이 값이면 "감지"로 본다. CDecap_Sensor_Update()가 raw를 내부 논리값으로 바꾸며
+ * 내부(xSL, GSENSOR) 규칙은 그대로다: Z/Y 리미트는 0 = 감지, 그리퍼 Open/Close·CT는 1 = 감지. raw 값은 DI 명령으로 본다.
+ * 2026-11-19 실기(사용자 확인): Cap/Body Open/Close는 감지 시 0(열려 있는데 닫힘으로 읽힘), CT는 감지 시 1(정상).
+ * Z High/Low는 감지 시 1(사용자 요청으로 다시 1): 앞서 1로 바꿨을 때 HOME 시작 즉시 E2892(입력 1,1)가 나서 0으로 되돌린 이력이 있다.
+ * 같은 증상이 나면 DI로 Z High/Low raw 값을 먼저 확인한다. Y Forward/Back은 0(실기 미확인). */
+#define Z_LIMIT_ACTIVE_LEVEL           (1U)
+#define Y_LIMIT_ACTIVE_LEVEL           (0U)
+#define GRIP_SENSOR_ACTIVE_LEVEL       (0U)
+#define CT_DETECT_ACTIVE_LEVEL         (1U)
 
 /*Y축 공압기*/
 #define Y_PIN_F_CONTROLLER		(0)
 #define Y_PIN_B_CONTROLLER		(1)
 
-/* CT 공압 그리퍼 출력 (DO 채널 번호 = 비트 번호 + 1) */
-#define AIR_CT_CAP_GRIP_PIN      (2)
-#define AIR_CT_CAP_UNGRIP_PIN    (3)
-#define AIR_CT_BODY_GRIP_PIN     (6) // DO7: GRIP
-#define AIR_CT_BODY_UNGRIP_PIN   (7) // DO8: UNGRIP
+/* CT 공압 그리퍼 출력 (DO 채널 번호 = 비트 번호 + 1)
+ * STANOS 과제 배선: Body = 비트 2/3, Cap = 비트 4/5 (일반 Decapper는 Cap 2/3, Body 6/7). */
+#define AIR_CT_BODY_GRIP_PIN     (2) // DO3: GRIP
+#define AIR_CT_BODY_UNGRIP_PIN   (3) // DO4: UNGRIP
+#define AIR_CT_CAP_GRIP_PIN      (4) // DO5: GRIP
+#define AIR_CT_CAP_UNGRIP_PIN    (5) // DO6: UNGRIP
 
 typedef void (*FSM_Handler)(void);
 
@@ -228,6 +282,10 @@ typedef enum{
 	CDECAP_HOMING_Y_HOME,
 	CDECAP_HOMING_Y_WAIT,
 	CDECAP_HOMING_COMPLETE,
+	CDECAP_HOMING_BODY_RELEASE,	/* 15: Y 전진 전 Body 해제 대기(GERD 번호 호환을 위해 뒤에 추가) */
+	CDECAP_HOMING_OFFSET_MOVE,	/* 16: High 감지 위치에서 Z_HOME_OFFSET_PULSE 만큼 물러나는 이동 발행 */
+	CDECAP_HOMING_OFFSET_WAIT,	/* 17: 물러남 완료와 High 해제 확인 */
+	CDECAP_HOMING_GRIP_RELEASE,	/* 18: Z 이동 전 Cap·Body 해제 후 HOME_GRIP_RELEASE_WAIT_MS 대기 */
 }CDecap_HomingStep_t;
 
 typedef struct{
@@ -351,6 +409,8 @@ typedef enum{
 	SUB_DECAPPING,
     SUB_ACTION_COUNT,
 	SUB_CAP_UNGRIP_WAIT,
+	SUB_LR_INTERVAL,	/* LR DECAP/CAP 사이 대기(LR_INTERVAL_MS), PAUSE 시간 보정 대상 */
+	SUB_LR_CT_WAIT,		/* LR 절반 시작 시 CT 감지 대기(CT_DETECT_WAIT_MS), PAUSE 시간 보정 대상 */
 	SUB_MAX
 } teDecapperSubIndex;
 
@@ -365,7 +425,8 @@ typedef enum{
 	Recovery_Z,
 	Recovery_Y,
 	Recovery_COMPLETE,
-	Recovery__DONE
+	Recovery__DONE,
+	Recovery_Body_Release   /* 5: Z 복귀 후 Body 해제 → Y 전진 전 대기(GERD 번호 호환을 위해 뒤에 추가) */
 } Recovery_Step_t;
 
 typedef enum{
@@ -386,6 +447,12 @@ typedef enum{
 	CDecapping_Move_PrevY,
 	CDecapping_Complete_Wait,
 	CDecapping_Done,
+
+	/* GERD step 번호 호환을 위해 기존 값 뒤에 추가 */
+	CDecapping_Body_Release,      /* 13: 작업 후 Body 해제 → Y 전진 전 대기 */
+	CDecapping_Body_PreRelease,   /* 14: 시작 시 Body 해제 확인 → Y 후진 전 대기(오류로 잡힌 채 남은 경우) */
+	CDecapping_Cap_UpWait,        /* 15: CAP에서 Z Up 위치 도착 후 회전·하강 전 대기(CAP_UP_DWELL_MS) */
+	CDecapping_Y_Back_Settle,     /* 16: Y Back 센서 감지 후 Body 잡기 전 대기(Y_BACK_SETTLE_MS) */
 
 } CDecapping_Statmachin_state;
 
@@ -483,6 +550,8 @@ void CDecap_EndMaintenance(void);
  * 호출부가 유효한 일반 액션을 전달해야 한다. STOP은 RequestStop으로 별도 요청한다.
  */
 bool CDecap_TryRequestAction(teXActionType action);
+/** @brief DECAP/CAP/UDECAP/UCAP/LR처럼 HOME 완료(isHomed)가 필요한 동작이면 true. */
+bool CDecap_ActionNeedsHome(teXActionType action);
 /** @brief 현재 Phase에서 허용되는 PAUSE(true) 또는 RESUME(false) 요청만 접수한다. */
 bool CDecap_TryRequestPause(bool pause);
 /**
@@ -538,12 +607,16 @@ void CDecap_SetSpeedPercent(U08 percent);
  */
 U08 CDecap_GetSpeedPercent(void);
 bool CDecap_IsValidTarget(U08 axis, S32 position);
+/* 축의 현재 위치를 앱 좌표로 읽는다(Z는 Z_COORD_SIGN 적용). 호출부가 xMutex_DecapperMotion을 잡고 부른다. */
+S32 CDecap_GetAxisPosition(U08 axis);
 /** @brief 지정한 Decapper 설정의 기본·소프트 리미트로 목표 좌표를 검증한다. */
 bool CDecap_IsValidTargetFor(const tsXPL_Decapper *parameters, U08 axis, S32 position);
 int CDecap_GetPhase(void);
 bool CDecap_IsPaused(void);
 U32 CDecap_GetLongRunLimit(void);
 bool CDecap_TryLongRun(U32 limit);
+/** @brief 보내지 않은 LR 사이클 완료 횟수가 있으면 *count에 넣고 true(한 번만). 네트워크 태스크 전용. */
+bool CDecap_TakeLongRunReport(U32 *count);
 U32 CDecap_GetOperationId(void);
 int CDecap_GetOperationResult(void);
 #endif /* APP_HW_DEVICE_CDCAP_H_ */

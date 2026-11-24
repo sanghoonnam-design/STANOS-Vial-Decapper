@@ -193,7 +193,7 @@ int main(void){
  CHECK("RPOS R prints a raw position outside configured limits",!strcmp(response,"100001") && gRDecapPosPendingValue==100001);
  prepare();gZCapUpPosSavePending=gRDecapPosSavePending=true;
  gZCapUpPosPendingValue=456;gRDecapPosPendingValue=3200;
- xPL.Decapper.Limit_PosR=1000;CMD_Handle_SAVEE(&saveZ,0);
+ gRDecapPosPendingValue=8388608;CMD_Handle_SAVEE(&saveZ,0);
  CHECK("out of range R candidate does not block SAVE Z",!strcmp(response,"OK") && storedZ==456 && storedR==111 && gRDecapPosSavePending);
  CMD_Handle_SAVEE(&saveR,0);
  CHECK("SAVE R checks its range before accessing EEPROM",!strcmp(response,"RANGE") && saves==1 && xPL.Decapper.RDecapPos==111);
@@ -207,9 +207,9 @@ int main(void){
  CHECK("successful LOAD cancels R teaching candidate",!gRDecapPosSavePending && !xSL.isHomed);
  prepare();position[aR]=765;gRDecapPosSavePending=true;CMD_Handle_HOME(&p,0);
  CHECK("accepted HOME cancels R teaching candidate",!gRDecapPosSavePending && xAT==ACTION_HOME);
- for(int n=0;n<100;n++){
-  if(HomingSeq.Step==CDECAP_HOMING_H_REACH || HomingSeq.Step==CDECAP_HOMING_S_REACH)xSL.CDecapping_Sensor.Z_H_Limit_Sensor=0;
-  if(HomingSeq.Step==CDECAP_HOMING_L_REACH_OFF)xSL.CDecapping_Sensor.Z_H_Limit_Sensor=1;
+ for(int n=0;n<300;n++){ /* HOME은 Y 전진 전 Body 해제 대기(최대 100틱)를 포함한다 */
+  if(HomingSeq.Step==CDECAP_HOMING_H_REACH || HomingSeq.Step==CDECAP_HOMING_S_REACH)xSL.CDecapping_Sensor.Z_L_Limit_Sensor=0;
+  if(HomingSeq.Step==CDECAP_HOMING_L_REACH_OFF)xSL.CDecapping_Sensor.Z_L_Limit_Sensor=1;
   CDecap_Action_Statemachine(xAT);gTriggerCount++;
   if(sPhase==DFSM_IDLE && xAT==ACTION_NONE)break;
  }

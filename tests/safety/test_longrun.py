@@ -71,24 +71,24 @@ static void begin_unit(teXActionType action){CDecap_TryRequestAction(action);}
 static void finish_unit(void){for(int n=0;n<3000 && !xSL.isError;n++){tick();if(sPhase==DFSM_IDLE && xAT==ACTION_NONE)break;}}
 int main(void){
  setbuf(stdout,NULL);
- setup();position[1]=2500;start();run(1000,1000000);
+ setup();position[1]=2500;start();run(1000,3000000);
  CHECK("1000 cycles return R to HOME zero from a nonzero start",xCD.Decapper.LongRunCount==1000 && !xSL.isError && position[1]==0);
  bool equal=true;for(int i=0;i<rMoves;i++)if(rDistance[i]!=(i==0?-3500:(i%2?1000:-1000)))equal=false;
  CHECK("DECAP/CAP use fixed absolute endpoints without accumulating",equal && rMoves==8);
  setup();mode=2;start();run(3,3000);
  CHECK("stopped feedback without arrival times out before grip/count",xCD.Decapper.LongRunCount==0 && errorCode==ERROR_CODE_DECAP_TIMEOUT && io[AIR_CT_CAP_GRIP_PIN]==0 && !overwritten);
- setup();startDelay=3;start();run(10,10000);
+ setup();startDelay=3;start();run(10,30000);
  CHECK("delayed start cannot overwrite target or change grip early",xCD.Decapper.LongRunCount==10 && !xSL.isError && !overwritten && !prematureGrip && position[1]==0);
  setup();mode=1;start();run(1,1000);
  CHECK("running feedback stuck faults with no count",errorCode==ERROR_CODE_DECAP_TIMEOUT && xCD.Decapper.LongRunCount==0);
- setup();xPL.Decapper.ZCap_SidePos=xPL.Decapper.ZCap_UpPos=0;xPL.Decapper.RDecapPos=0;start();run(5,3000);
+ setup();xPL.Decapper.ZCap_SidePos=xPL.Decapper.ZCap_UpPos=0;xPL.Decapper.RDecapPos=0;start();run(5,10000);
  CHECK("already at target completes without observing motor ON",xCD.Decapper.LongRunCount==5 && !xSL.isError);
  setup();position[1]=4000;begin_unit(ACTION_UCAP);finish_unit();begin_unit(ACTION_UCAP);finish_unit();
  CHECK("repeated standalone CAP stays at zero",position[1]==0 && !xSL.isError);
  begin_unit(ACTION_UDECAP);finish_unit();begin_unit(ACTION_UDECAP);finish_unit();
  CHECK("repeated standalone DECAP stays at taught target",position[1]==-1000 && !xSL.isError);
- setup();xPL.Decapper.RDecapPos=100001;begin_unit(ACTION_UDECAP);finish_unit();
- CHECK("absolute R endpoint beyond limit faults",errorCode==ERROR_CODE_DECAP_LIMIT && rMoves==0);
+ setup();xPL.Decapper.RDecapPos=8388608;begin_unit(ACTION_UDECAP);finish_unit();
+ CHECK("absolute R endpoint beyond the TMC429 24-bit range faults",errorCode==ERROR_CODE_DECAP_LIMIT && rMoves==0);
  setup();xPL.Decapper.RDecapPos=INT32_MIN;begin_unit(ACTION_UDECAP);finish_unit();
  CHECK("invalid signed R target cannot enter a valid goal",errorCode==ERROR_CODE_DECAP_LIMIT && rMoves==0);
  setup();mode=2;xCD.Decapper.Motor_TargetPos[0]=500;begin_unit(ACTION_AMOVEZ);finish_unit();
@@ -109,7 +109,7 @@ int main(void){
   CHECK("invalid DECAP Z endpoint is rejected before the paired R command",
         errorCode==ERROR_CODE_DECAP_LIMIT && rMoves==0 && position[aR]==0);
  }
- setup();position[aR]=0;xPL.Decapper.RDecapPos=100001;
+ setup();position[aR]=0;xPL.Decapper.RDecapPos=8388608;
  begin_unit(ACTION_UDECAP);finish_unit();
  CHECK("invalid R endpoint also blocks the paired Z move",
        errorCode==ERROR_CODE_DECAP_LIMIT && rMoves==0 && moveCount==1);
@@ -132,7 +132,8 @@ int main(void){
    failed++;printf("DETAIL pause failure delay=%d phase=%d step=%d count=%lu error=%d R=%ld\n",delay,ph,st,(unsigned long)xCD.Decapper.LongRunCount,errorCode,(long)position[1]);
   }
  }
- CHECK("PAUSE/RESUME in 28 phase/step/delay cases preserves remaining motion",cases==28 && failed==0);
+ /* LR은 자동 DECAP/CAP 전체 시퀀스: Body 해제확인·Y·Body 단계 + CAP Up 대기 포함 13+13단계 x 지연 2종 = 52 */
+ CHECK("PAUSE/RESUME in 52 phase/step/delay cases preserves remaining motion",cases==52 && failed==0);
  setup();gTriggerCount=UINT32_MAX-80;start();run(3,5000);
  CHECK("tick wrap preserves target tracking",xCD.Decapper.LongRunCount==3 && !xSL.isError);
  setup();start();for(int n=0;n<150;n++)tick();tsXParsedData cmd={0};CMD_Handle_STOP(&cmd,0);CMD_Handle_RESUME(&cmd,0);tick();
@@ -141,6 +142,39 @@ int main(void){
  setup();cmd.ParamCount=1;cmd.Params[0].type=PARAM_TYPE_INT;cmd.Params[0].value._int=3;CMD_Handle_LongRun(&cmd,0);
  for(int n=0;n<10000;n++){tick();if(sPhase==DFSM_IDLE)break;}
  CHECK("finite LR ends exactly after full CAP cycle",xCD.Decapper.LongRunCount==3 && sPhase==DFSM_IDLE && !xSL.isBusy && position[1]==0);
+ /* LR 절반 사이 5초(LR_INTERVAL_MS) 대기: 출력·모터 변화 없음, PAUSE 시간은 대기에서 제외 */
+ for(int paused=0;paused<2;paused++){
+  setup();start();
+  for(int n=0;n<5000 && xCD.Decapper.phaseDecapCap!=LONGRUN_CAP && !xSL.isError;n++) tick();
+  int moves=moveCount;int snap[16];memcpy(snap,io,sizeof io);
+  U32 interval=MS_TO_TICKS(LR_INTERVAL_MS);U32 waited=0;
+  if(paused){
+   tick();waited++;
+   tsXParsedData c={0};CMD_Handle_PAUSE(&c,0);
+   for(int n=0;n<500;n++)tick();
+   CMD_Handle_RESUME(&c,0);
+  }
+  bool quiet=true;
+  while(waited<interval-1){tick();waited++;if(moveCount!=moves||memcmp(snap,io,sizeof io)||CDecapping_Step!=CDecapping_Idle)quiet=false;}
+  int started=0;for(int n=0;n<5 && !started;n++){tick();if(memcmp(snap,io,sizeof io)||moveCount!=moves||CDecapping_Step!=CDecapping_Idle)started=1;}
+  CHECK(paused?"PAUSE during the LR rest excludes the paused time and keeps outputs still":
+               "LR rests 1 s between DECAP and CAP with no output or motor change",
+        quiet && started && !xSL.isError && xCD.Decapper.phaseDecapCap==LONGRUN_CAP);
+ }
+ /* LRCOUNT 알림: 사이클 완료마다 정확한 횟수가 한 번씩만 나오고, 새 LR 시작 시 이전 알림은 버린다 */
+ {
+  setup();start();U32 got=0,expect=1;bool ok=true;
+  for(int n=0;n<60000 && xCD.Decapper.LongRunCount<3 && !xSL.isError;n++){
+   tick();U32 c;
+   if(CDecap_TakeLongRunReport(&c)){ if(c!=expect||c!=xCD.Decapper.LongRunCount)ok=false; expect++;got++; }
+   if(CDecap_TakeLongRunReport(&c))ok=false; /* 같은 알림이 두 번 나오면 안 됨 */
+  }
+  CHECK("each completed LR cycle reports its count exactly once (LRCOUNT 1,2,3)",ok && got==3 && !xSL.isError);
+  while(xCD.Decapper.LongRunCount<4 && !xSL.isError) tick();          /* 4번째 알림은 꺼내지 않음 */
+  tsXParsedData c={0};CMD_Handle_STOP(&c,0);tick();tick();
+  start();tick();U32 stale;
+  CHECK("a new LR discards an unsent report from the previous run",!CDecap_TakeLongRunReport(&stale) && !xSL.isError);
+ }
  return failures?1:0;
 }
 '''

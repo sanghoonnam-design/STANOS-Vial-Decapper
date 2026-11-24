@@ -37,7 +37,9 @@ typedef enum
 	FW_MODE_COUNT
 } teXFW_Mode;
 
-#define MODEL_NAME_STR ("Robo-C") // 시스템 모델명 문자열
+/* 시스템 모델명 문자열. 부트로더 진입 시 BootInfo->model(40바이트)과 웹 /status 응답의 model= 에 쓰인다.
+ * 2026-11-19 사용자 요청: STANOS 과제 장비명으로 변경(기존 "Robo-C"). */
+#define MODEL_NAME_STR ("STANOS-Vial-Decapper")
 
 #define FW_MODE_TEST (FW_MODE_IDLE)
 #define FW_MODE_MAIN_TASK_STOP (FW_MODE_TIMER_STOP)
